@@ -1,0 +1,1887 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+  <meta name="theme-color" content="#22c55e"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <meta name="apple-mobile-web-app-title" content="SMFA"/>
+  <meta name="description" content="Suhum Municipal Football Association – League Management System 2025/26"/>
+  <title>SMFA – Suhum Municipal Football Association</title>
+  <link rel="manifest" href="./manifest.json"/>
+  <link rel="apple-touch-icon" href="./icon-192.png"/>
+  <link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png"/>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; background: #080f0a; }
+    #root { min-height: 100vh; }
+    #pwa-loader {
+      position: fixed; inset: 0; background: #080f0a;
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; z-index: 9999; gap: 18px;
+      font-family: sans-serif; color: #22c55e;
+      transition: opacity 0.4s;
+    }
+    #pwa-loader .ball { font-size: 54px; animation: spin 1.4s linear infinite; }
+    #pwa-loader .lbl { font-size: 13px; letter-spacing: 3px; text-transform: uppercase; color: #5a7a62; }
+    @keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+  </style>
+</head>
+<body>
+  <div id="pwa-loader">
+    <div class="ball">⚽</div>
+    <div style="font-size:20px;letter-spacing:4px;font-weight:900;">SMFA</div>
+    <div class="lbl">Loading…</div>
+  </div>
+  <!-- Install App Banner -->
+  <div id="install-btn" style="display:none;position:fixed;bottom:0;left:0;right:0;z-index:9998;background:linear-gradient(90deg,#0c1a0e,#0f2d17);border-top:1px solid #22c55e55;padding:12px 20px;align-items:center;justify-content:space-between;gap:12px;font-family:sans-serif;">
+    <div style="display:flex;align-items:center;gap:10px;"><span style="font-size:28px;">⚽</span><div><div style="color:#22c55e;font-size:13px;font-weight:700;letter-spacing:1px;">Install SMFA App</div><div style="color:#5a7a62;font-size:11px;">Add to home screen for offline use</div></div></div>
+    <div style="display:flex;gap:8px;"><button onclick="window._smfaInstall()" style="background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;border:none;padding:8px 16px;border-radius:8px;font-size:12px;font-weight:700;letter-spacing:1px;cursor:pointer;">INSTALL</button><button onclick="document.getElementById('install-btn').style.display='none'" style="background:transparent;color:#5a7a62;border:1px solid #1c3d22;padding:8px 12px;border-radius:8px;font-size:12px;cursor:pointer;">✕</button></div>
+  </div>
+
+  <div id="root"></div>
+
+  <!-- React + ReactDOM (production) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Babel standalone for JSX transpilation -->
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+
+  <script type="text/babel" data-presets="react">
+    const { useState, useRef, useEffect } = React;
+
+
+// ─── STORAGE ──────────────────────────────────────────────────────
+const STORAGE_KEY = "smfa_v5";
+
+// ─── CLOUD SYNC ───────────────────────────────────────────────────
+// Uses JSONBin.io — free, no account or signup needed.
+// On first activation a bin is auto-created and its ID saved to
+// localStorage so every future push/pull uses the same bin.
+//
+// HOW IT WORKS:
+//   Admin clicks "Activate" → bin created → ID stored locally
+//   Every admin change → data pushed to that bin (debounced 1.5s)
+//   Viewers opening the shared link → pull latest data every 30s
+
+const JSONBIN_API  = "https://api.jsonbin.io/v3/b";
+const CLOUD_KEY_STORAGE = "smfa_bin_id";   // localStorage key holding the bin ID
+const CLOUD_READY_KEY   = "smfa_cloud_ok"; // flag: "1" once first push succeeds
+
+function getCloudReady() {
+  try { return localStorage.getItem(CLOUD_READY_KEY) === "1"; } catch { return false; }
+}
+function setCloudReady() {
+  try { localStorage.setItem(CLOUD_READY_KEY, "1"); } catch {}
+}
+function getBinId() {
+  try { return localStorage.getItem(CLOUD_KEY_STORAGE) || null; } catch { return null; }
+}
+function saveBinId(id) {
+  try { localStorage.setItem(CLOUD_KEY_STORAGE, id); } catch {}
+}
+
+function slimData(data) {
+  const slim = JSON.parse(JSON.stringify(data));
+  const sizeLimit = 80000;
+  if (slim.assocLogo && slim.assocLogo.length > sizeLimit) slim.assocLogo = null;
+  if (slim.teams) slim.teams = slim.teams.map(t => t.logo && t.logo.length > sizeLimit ? {...t, logo: null} : t);
+  if (slim.players) {
+    Object.keys(slim.players).forEach(k => {
+      slim.players[k] = slim.players[k].map(p => p.photo && p.photo.length > sizeLimit ? {...p, photo: null} : p);
+    });
+  }
+  return slim;
+}
+
+async function cloudPush(data, apiKey) {
+  try {
+    const payload = { ...slimData(data), _updated: Date.now() };
+    let binId = getBinId();
+    // Retrieve saved key if not passed
+    const key = apiKey || (()=>{ try { return localStorage.getItem("smfa_api_key") || ""; } catch { return ""; } })();
+
+    if (!binId) {
+      // First time — create a new public bin
+      const createHeaders = { "Content-Type": "application/json", "X-Bin-Private": "false", "X-Bin-Name": "SMFA-League" };
+      if (key) createHeaders["X-Master-Key"] = key;
+      const res = await fetch(JSONBIN_API, {
+        method: "POST",
+        headers: createHeaders,
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) { const e = await res.text().catch(()=>"?"); console.error("JSONBin create failed:", res.status, e); return false; }
+      const json = await res.json();
+      binId = json.metadata?.id;
+      if (!binId) { console.error("JSONBin: no id in response", json); return false; }
+      saveBinId(binId);
+    } else {
+      // Update existing bin
+      const res = await fetch(`${JSONBIN_API}/${binId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) { const e = await res.text().catch(()=>"?"); console.error("JSONBin update failed:", res.status, e); return false; }
+    }
+
+    setCloudReady();
+    return true;
+  } catch { return false; }
+}
+
+async function cloudPull() {
+  try {
+    // Viewers get the bin ID from the URL; admins use the one saved in localStorage
+    const urlBin = (new URLSearchParams(window.location.search)).get("bin");
+    const binId = urlBin || getBinId();
+    if (!binId) return null;
+    // If viewer brought a different bin ID, save it so auto-refresh keeps working
+    if (urlBin && !getBinId()) saveBinId(urlBin);
+    const res = await fetch(`${JSONBIN_API}/${binId}/latest`);
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json.record || null;
+  } catch { return null; }
+}
+
+const getPublicLink = () => {
+  const binId = getBinId();
+  return "https://suhum.myfootballconsole.com/?view=suhum" + (binId ? "&bin=" + binId : "");
+};
+
+const DEFAULT_DATA = {
+  adminPassword: "0000",
+  assocName: "Suhum Municipal Football Association",
+  assocSeason: "2025/26",
+  assocLogo: null,
+  teams: [
+    { id: 1,  name: "FC Suhum United",       shortName: "SUU", color: "#e63946", logo: null },
+    { id: 2,  name: "Riverside City FC",      shortName: "RCF", color: "#2a9d8f", logo: null },
+    { id: 3,  name: "Northern Stars",         shortName: "NST", color: "#e9c46a", logo: null },
+    { id: 4,  name: "Suhum Athletic",         shortName: "SAT", color: "#9b5de5", logo: null },
+    { id: 5,  name: "Eagles FC",              shortName: "EGL", color: "#f4a261", logo: null },
+    { id: 6,  name: "Harbour Boys",           shortName: "HBY", color: "#0077b6", logo: null },
+    { id: 7,  name: "Red Lions",              shortName: "RDL", color: "#d62828", logo: null },
+    { id: 8,  name: "Green Valley FC",        shortName: "GVF", color: "#2dc653", logo: null },
+    { id: 9,  name: "Municipal Rovers",       shortName: "MRV", color: "#ff6b6b", logo: null },
+    { id: 10, name: "Suhum Wanderers",        shortName: "SWD", color: "#48cae4", logo: null },
+    { id: 11, name: "Black Stars FC",         shortName: "BSF", color: "#f8f9fa", logo: null },
+    { id: 12, name: "Golden Boys FC",         shortName: "GBF", color: "#ffd60a", logo: null },
+    { id: 13, name: "Kpong United",           shortName: "KPU", color: "#80b918", logo: null },
+    { id: 14, name: "Asuogyaman FC",          shortName: "ASU", color: "#e07a5f", logo: null },
+    { id: 15, name: "Coaltar Strikers",       shortName: "CLS", color: "#3d405b", logo: null },
+    { id: 16, name: "Osino Rising Stars",     shortName: "ORS", color: "#f72585", logo: null },
+  ],
+  stats: {
+    1: {played:10,won:7,drawn:2,lost:1, goalsFor:22,goalsAgainst:8,  pointsDeducted:0},
+    2: {played:10,won:6,drawn:2,lost:2, goalsFor:18,goalsAgainst:11, pointsDeducted:0},
+    3: {played:10,won:5,drawn:2,lost:3, goalsFor:14,goalsAgainst:12, pointsDeducted:3},
+    4: {played:10,won:5,drawn:1,lost:4, goalsFor:13,goalsAgainst:14, pointsDeducted:0},
+    5: {played:10,won:4,drawn:2,lost:4, goalsFor:11,goalsAgainst:13, pointsDeducted:0},
+    6: {played:10,won:3,drawn:3,lost:4, goalsFor:10,goalsAgainst:14, pointsDeducted:0},
+    7: {played:10,won:2,drawn:1,lost:7, goalsFor:8, goalsAgainst:20, pointsDeducted:0},
+    8: {played:10,won:1,drawn:1,lost:8, goalsFor:5, goalsAgainst:22, pointsDeducted:0},
+    9: {played:8, won:5,drawn:1,lost:2, goalsFor:16,goalsAgainst:9,  pointsDeducted:0},
+    10:{played:8, won:4,drawn:2,lost:2, goalsFor:13,goalsAgainst:10, pointsDeducted:0},
+    11:{played:8, won:3,drawn:3,lost:2, goalsFor:10,goalsAgainst:9,  pointsDeducted:0},
+    12:{played:8, won:3,drawn:2,lost:3, goalsFor:9, goalsAgainst:11, pointsDeducted:0},
+    13:{played:8, won:2,drawn:3,lost:3, goalsFor:8, goalsAgainst:12, pointsDeducted:0},
+    14:{played:8, won:2,drawn:2,lost:4, goalsFor:7, goalsAgainst:14, pointsDeducted:0},
+    15:{played:8, won:1,drawn:2,lost:5, goalsFor:5, goalsAgainst:16, pointsDeducted:0},
+    16:{played:8, won:1,drawn:1,lost:6, goalsFor:4, goalsAgainst:17, pointsDeducted:0},
+  },
+  players: {
+    1: [
+      {id:101,name:"Kofi Mensah",    age:24,position:"Goalkeeper",photo:null},
+      {id:102,name:"Ama Boateng",    age:22,position:"Defender",  photo:null},
+      {id:103,name:"Kwame Asante",   age:26,position:"Forward",   photo:null},
+      {id:104,name:"Eric Ofori",     age:23,position:"Midfielder", photo:null},
+      {id:105,name:"Daniel Acheampong",age:25,position:"Defender",photo:null},
+      {id:106,name:"Bright Owusu",   age:21,position:"Winger",    photo:null},
+      {id:107,name:"Isaac Mensah",   age:28,position:"Midfielder", photo:null},
+    ],
+    2: [
+      {id:201,name:"Yaw Asante",     age:27,position:"Midfielder", photo:null},
+      {id:202,name:"Samuel Darko",   age:21,position:"Forward",   photo:null},
+      {id:203,name:"Frank Annan",    age:29,position:"Goalkeeper", photo:null},
+      {id:204,name:"Kojo Appiah",    age:24,position:"Defender",  photo:null},
+      {id:205,name:"Emmanuel Quaye", age:22,position:"Winger",    photo:null},
+      {id:206,name:"Nana Agyei",     age:26,position:"Midfielder", photo:null},
+    ],
+    3: [
+      {id:301,name:"George Appiah",  age:24,position:"Forward",   photo:null},
+      {id:302,name:"Joseph Aidoo",   age:22,position:"Defender",  photo:null},
+      {id:303,name:"Charles Asare",  age:25,position:"Goalkeeper",photo:null},
+      {id:304,name:"Richard Doku",   age:23,position:"Midfielder", photo:null},
+      {id:305,name:"Patrick Amoah",  age:27,position:"Defender",  photo:null},
+    ],
+    4: [
+      {id:401,name:"Michael Boateng",age:28,position:"Midfielder", photo:null},
+      {id:402,name:"Abdul Razak",    age:24,position:"Forward",   photo:null},
+      {id:403,name:"Femi Balogun",   age:22,position:"Goalkeeper",photo:null},
+      {id:404,name:"Sampson Tetteh", age:26,position:"Defender",  photo:null},
+    ],
+    5: [
+      {id:501,name:"Kwesi Amoa",     age:23,position:"Forward",   photo:null},
+      {id:502,name:"Benjamin Sarpong",age:25,position:"Midfielder",photo:null},
+      {id:503,name:"Collins Asare",  age:27,position:"Goalkeeper",photo:null},
+      {id:504,name:"Prince Antwi",   age:21,position:"Defender",  photo:null},
+      {id:505,name:"Godfred Acheampong",age:24,position:"Winger", photo:null},
+    ],
+    6: [
+      {id:601,name:"Seidu Alhassan", age:26,position:"Midfielder", photo:null},
+      {id:602,name:"Mustapha Yakubu",age:22,position:"Forward",   photo:null},
+      {id:603,name:"Victor Owusu",   age:28,position:"Goalkeeper",photo:null},
+      {id:604,name:"Issah Fuseini",  age:23,position:"Defender",  photo:null},
+    ],
+    7: [
+      {id:701,name:"Theophilus Atta",age:24,position:"Forward",   photo:null},
+      {id:702,name:"Clement Donkor", age:26,position:"Midfielder", photo:null},
+      {id:703,name:"Francis Dadzie", age:29,position:"Goalkeeper",photo:null},
+      {id:704,name:"Dominic Owusu",  age:22,position:"Defender",  photo:null},
+    ],
+    8: [
+      {id:801,name:"Bright Amoako",  age:21,position:"Forward",   photo:null},
+      {id:802,name:"Simon Quaye",    age:23,position:"Midfielder", photo:null},
+      {id:803,name:"Elijah Mensah",  age:27,position:"Goalkeeper",photo:null},
+      {id:804,name:"Peter Adjei",    age:25,position:"Defender",  photo:null},
+    ],
+    9:  [{id:901,name:"Kweku Asumadu",age:25,position:"Forward",photo:null},{id:902,name:"Abena Frimpong",age:23,position:"Midfielder",photo:null},{id:903,name:"Bernard Ankrah",age:27,position:"Goalkeeper",photo:null}],
+    10: [{id:1001,name:"Fiifi Mensah",age:26,position:"Midfielder",photo:null},{id:1002,name:"Kwabena Tawiah",age:24,position:"Defender",photo:null}],
+    11: [{id:1101,name:"Nii Armah",age:28,position:"Forward",photo:null},{id:1102,name:"Selorm Agbeviadze",age:22,position:"Defender",photo:null}],
+    12: [{id:1201,name:"Emmanuel Lartey",age:24,position:"Midfielder",photo:null}],
+    13: [{id:1301,name:"Nana Osei",age:26,position:"Forward",photo:null}],
+    14: [{id:1401,name:"Kofi Agyeman",age:23,position:"Goalkeeper",photo:null}],
+    15: [{id:1501,name:"Desmond Opoku",age:25,position:"Defender",photo:null}],
+    16: [{id:1601,name:"Yaw Boateng",age:21,position:"Winger",photo:null}],
+  },
+  matches: [
+    {id:1, homeTeamId:1, awayTeamId:2, homeScore:3,awayScore:1,date:"2025-09-07",played:true, round:1},
+    {id:2, homeTeamId:3, awayTeamId:4, homeScore:2,awayScore:0,date:"2025-09-07",played:true, round:1},
+    {id:3, homeTeamId:5, awayTeamId:6, homeScore:1,awayScore:1,date:"2025-09-07",played:true, round:1},
+    {id:4, homeTeamId:7, awayTeamId:8, homeScore:2,awayScore:0,date:"2025-09-07",played:true, round:1},
+    {id:5, homeTeamId:9, awayTeamId:10,homeScore:2,awayScore:1,date:"2025-09-07",played:true, round:1},
+    {id:6, homeTeamId:11,awayTeamId:12,homeScore:0,awayScore:0,date:"2025-09-07",played:true, round:1},
+    {id:7, homeTeamId:13,awayTeamId:14,homeScore:1,awayScore:0,date:"2025-09-07",played:true, round:1},
+    {id:8, homeTeamId:15,awayTeamId:16,homeScore:1,awayScore:2,date:"2025-09-07",played:true, round:1},
+    {id:9, homeTeamId:2, awayTeamId:3, homeScore:1,awayScore:1,date:"2025-09-14",played:true, round:2},
+    {id:10,homeTeamId:4, awayTeamId:1, homeScore:0,awayScore:2,date:"2025-09-14",played:true, round:2},
+    {id:11,homeTeamId:6, awayTeamId:7, homeScore:3,awayScore:0,date:"2025-09-14",played:true, round:2},
+    {id:12,homeTeamId:8, awayTeamId:5, homeScore:0,awayScore:2,date:"2025-09-14",played:true, round:2},
+    {id:13,homeTeamId:1, awayTeamId:5, homeScore:null,awayScore:null,date:"2025-10-05",played:false,round:3},
+    {id:14,homeTeamId:2, awayTeamId:6, homeScore:null,awayScore:null,date:"2025-10-05",played:false,round:3},
+    {id:15,homeTeamId:3, awayTeamId:7, homeScore:null,awayScore:null,date:"2025-10-05",played:false,round:3},
+    {id:16,homeTeamId:4, awayTeamId:8, homeScore:null,awayScore:null,date:"2025-10-05",played:false,round:3},
+    {id:17,homeTeamId:9, awayTeamId:11,homeScore:null,awayScore:null,date:"2025-10-05",played:false,round:3},
+    {id:18,homeTeamId:10,awayTeamId:12,homeScore:null,awayScore:null,date:"2025-10-05",played:false,round:3},
+  ],
+  scorers: [
+    {id:1,teamId:1, playerName:"Kwame Asante",    goals:8,assists:3,yellowCards:1,redCards:0},
+    {id:2,teamId:2, playerName:"Yaw Asante",       goals:6,assists:5,yellowCards:0,redCards:0},
+    {id:3,teamId:3, playerName:"George Appiah",    goals:5,assists:2,yellowCards:2,redCards:0},
+    {id:4,teamId:5, playerName:"Kwesi Amoa",       goals:4,assists:1,yellowCards:0,redCards:0},
+    {id:5,teamId:1, playerName:"Eric Ofori",       goals:4,assists:4,yellowCards:1,redCards:0},
+    {id:6,teamId:2, playerName:"Samuel Darko",     goals:3,assists:2,yellowCards:1,redCards:0},
+    {id:7,teamId:6, playerName:"Mustapha Yakubu",  goals:3,assists:0,yellowCards:3,redCards:1},
+    {id:8,teamId:4, playerName:"Abdul Razak",      goals:2,assists:3,yellowCards:0,redCards:0},
+    {id:9,teamId:9, playerName:"Kweku Asumadu",    goals:5,assists:2,yellowCards:1,redCards:0},
+    {id:10,teamId:10,playerName:"Fiifi Mensah",    goals:3,assists:4,yellowCards:0,redCards:0},
+  ],
+};
+
+function loadData() {
+  try {
+    const r = localStorage.getItem(STORAGE_KEY);
+    if (r) { const p = JSON.parse(r); return {...DEFAULT_DATA, ...p}; }
+  } catch {}
+  return DEFAULT_DATA;
+}
+function saveData(d) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); } catch {}
+}
+
+// ─── FORMATIONS ──────────────────────────────────────────────────
+const FORMATIONS = ["4-3-3","4-4-2","3-5-2","4-2-3-1","5-3-2","3-4-3"];
+const FPOS = {
+  "4-3-3":   [{s:"GK",x:50,y:88},{s:"RB",x:80,y:70},{s:"CB",x:62,y:72},{s:"CB",x:38,y:72},{s:"LB",x:20,y:70},{s:"CM",x:70,y:52},{s:"CM",x:50,y:50},{s:"CM",x:30,y:52},{s:"RW",x:78,y:28},{s:"ST",x:50,y:22},{s:"LW",x:22,y:28}],
+  "4-4-2":   [{s:"GK",x:50,y:88},{s:"RB",x:80,y:70},{s:"CB",x:62,y:72},{s:"CB",x:38,y:72},{s:"LB",x:20,y:70},{s:"RM",x:80,y:48},{s:"CM",x:60,y:50},{s:"CM",x:40,y:50},{s:"LM",x:20,y:48},{s:"ST",x:62,y:22},{s:"ST",x:38,y:22}],
+  "3-5-2":   [{s:"GK",x:50,y:88},{s:"CB",x:68,y:72},{s:"CB",x:50,y:74},{s:"CB",x:32,y:72},{s:"RWB",x:84,y:52},{s:"CM",x:68,y:50},{s:"CM",x:50,y:48},{s:"CM",x:32,y:50},{s:"LWB",x:16,y:52},{s:"ST",x:62,y:22},{s:"ST",x:38,y:22}],
+  "4-2-3-1": [{s:"GK",x:50,y:88},{s:"RB",x:80,y:70},{s:"CB",x:62,y:72},{s:"CB",x:38,y:72},{s:"LB",x:20,y:70},{s:"DM",x:62,y:56},{s:"DM",x:38,y:56},{s:"RAM",x:74,y:36},{s:"CAM",x:50,y:34},{s:"LAM",x:26,y:36},{s:"ST",x:50,y:18}],
+  "5-3-2":   [{s:"GK",x:50,y:88},{s:"RWB",x:84,y:68},{s:"CB",x:68,y:72},{s:"CB",x:50,y:74},{s:"CB",x:32,y:72},{s:"LWB",x:16,y:68},{s:"CM",x:68,y:48},{s:"CM",x:50,y:46},{s:"CM",x:32,y:48},{s:"ST",x:62,y:22},{s:"ST",x:38,y:22}],
+  "3-4-3":   [{s:"GK",x:50,y:88},{s:"CB",x:68,y:72},{s:"CB",x:50,y:74},{s:"CB",x:32,y:72},{s:"RM",x:80,y:52},{s:"CM",x:60,y:50},{s:"CM",x:40,y:50},{s:"LM",x:20,y:52},{s:"RW",x:78,y:26},{s:"ST",x:50,y:20},{s:"LW",x:22,y:26}],
+};
+const POSITIONS = ["Goalkeeper","Defender","Midfielder","Forward","Winger","Striker"];
+
+// ─── HELPERS ─────────────────────────────────────────────────────
+const readFile = (file, cb) => { const r = new FileReader(); r.onload = e => cb(e.target.result); r.readAsDataURL(file); };
+const initials = (name, n=2) => name ? name.split(" ").map(w=>w[0]).join("").slice(0,n).toUpperCase() : "?";
+const pickFile = (accept, cb) => { const inp = document.createElement("input"); inp.type="file"; inp.accept=accept; inp.onchange=e=>{const f=e.target.files[0];if(f)readFile(f,cb);}; inp.click(); };
+
+const TeamLogo = ({logo, name, color, size=40}) => {
+  if (logo) return <img src={logo} alt={name} style={{width:size,height:size,borderRadius:8,objectFit:"cover",border:`2px solid ${color}55`,flexShrink:0}}/>;
+  return <div style={{width:size,height:size,borderRadius:8,background:color,display:"flex",alignItems:"center",justifyContent:"center",fontSize:size*.24,fontWeight:900,color:"#fff",fontFamily:"'Bebas Neue',sans-serif",letterSpacing:1,border:"2px solid rgba(255,255,255,0.15)",flexShrink:0}}>{initials(name,3)}</div>;
+};
+
+const PlayerAvatar = ({photo, name, color="#16a34a", size=52}) => {
+  if (photo) return <img src={photo} alt={name} style={{width:size,height:size,borderRadius:"50%",objectFit:"cover",border:`2.5px solid ${color}`,flexShrink:0}}/>;
+  return <div style={{width:size,height:size,borderRadius:"50%",background:`linear-gradient(135deg,${color}44,${color}99)`,border:`2.5px solid ${color}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:size*.3,fontWeight:900,color:"#fff",fontFamily:"'Bebas Neue',sans-serif",flexShrink:0}}>{initials(name)}</div>;
+};
+
+// ─── MAIN ────────────────────────────────────────────────────────
+function App() {
+  const saved = loadData();
+
+  // ── Auth
+  const [isAdmin,       setIsAdmin]       = useState(false);
+  const [adminPw,       setAdminPw]       = useState(saved.adminPassword || "0000");
+  const [loginInput,    setLoginInput]    = useState("");
+  const [loginErr,      setLoginErr]      = useState("");
+  const [showLogin,     setShowLogin]     = useState(false);
+  const [showPwChange,  setShowPwChange]  = useState(false);
+  const [pwNew,         setPwNew]         = useState("");
+  const [pwConfirm,     setPwConfirm]     = useState("");
+  const [pwErr,         setPwErr]         = useState("");
+
+  // ── Assoc identity
+  const [assocName,   setAssocName]   = useState(saved.assocName   || "Suhum Municipal Football Association");
+  const [assocSeason, setAssocSeason] = useState(saved.assocSeason || "2025/26");
+  const [assocLogo,   setAssocLogo]   = useState(saved.assocLogo   || null);
+  const [modalAssoc,  setModalAssoc]  = useState(false);
+
+  // ── Data
+  const [teams,   setTeams]   = useState(saved.teams);
+  const [stats,   setStats]   = useState(saved.stats);
+  const [players, setPlayers] = useState(saved.players);
+  const [matches, setMatches] = useState(saved.matches);
+  const [scorers, setScorers] = useState(saved.scorers);
+
+  // ── UI
+  const [tab,          setTab]          = useState("table");
+  const [editSection,  setEditSection]  = useState("teams");
+  const [notify,       setNotify]       = useState(null);
+  const [printTeamId,  setPrintTeamId]  = useState(teams[0]?.id || null);
+  const [printMode,    setPrintMode]    = useState("cards");
+
+  // ── Modals
+  const [modalAddTeam,    setModalAddTeam]    = useState(false);
+  const [modalEditTeam,   setModalEditTeam]   = useState(null);  // team obj
+  const [modalAddPlayer,  setModalAddPlayer]  = useState(false);
+  const [modalAddMatch,   setModalAddMatch]   = useState(false);
+  const [modalAddScorer,  setModalAddScorer]  = useState(false);
+  const [modalShare,      setModalShare]      = useState(false);
+  const [modalEditPlayer, setModalEditPlayer] = useState(null);
+
+  // ── Form state
+  const [selTeamId,   setSelTeamId]   = useState(teams[0]?.id);
+  const [newTeam,     setNewTeam]     = useState({name:"",shortName:"",color:"#16a34a",logo:null});
+  const [newPlayer,   setNewPlayer]   = useState({name:"",age:"",position:"Midfielder",photo:null});
+  const [newMatch,    setNewMatch]    = useState({homeTeamId:teams[0]?.id,awayTeamId:teams[1]?.id,homeScore:"",awayScore:"",date:"",round:""});
+  const [newScorer,   setNewScorer]   = useState({teamId:teams[0]?.id,playerName:"",goals:0,assists:0,yellowCards:0,redCards:0});
+  const [matchFilter, setMatchFilter] = useState("all");
+  const [scorerSort,  setScorerSort]  = useState("goals");
+  const [copyOk,      setCopyOk]      = useState(false);
+
+  // ── Lineup
+  const [luTeamId, setLuTeamId] = useState(teams[0]?.id);
+  const [luForm,   setLuForm]   = useState("4-3-3");
+  const [lineup,   setLineup]   = useState({});
+
+  // ── Persist locally
+  useEffect(() => { saveData({adminPassword:adminPw,assocName,assocSeason,assocLogo,teams,stats,players,matches,scorers}); }, [adminPw,assocName,assocSeason,assocLogo,teams,stats,players,matches,scorers]);
+
+  const toast = (msg, type="ok") => { setNotify({msg,type}); setTimeout(()=>setNotify(null),3000); };
+
+  // ── Cloud sync state
+  const urlParams  = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
+  const viewKey    = urlParams ? (urlParams.get("view") || urlParams.get("share")) : null;
+  const isViewer   = !!viewKey;
+  const [cloudStatus,      setCloudStatus]      = useState("idle");
+  const [cloudReady,       setCloudReady_state] = useState(() => getCloudReady());
+  const [modalCloudSetup,  setModalCloudSetup]  = useState(false);
+  const [cloudSetupStep,   setCloudSetupStep]   = useState("idle"); // idle | pushing | done | fail
+  const [cloudApiKey,      setCloudApiKey]      = useState(() => { try { return localStorage.getItem("smfa_api_key") || ""; } catch { return ""; } });
+  const [cloudBinId,       setCloudBinId]       = useState(() => getBinId());
+
+  // Helper to load cloud data into state
+  const applyCloudData = (d) => {
+    if (!d || typeof d !== "object") return;
+    if (d.assocName)   setAssocName(d.assocName);
+    if (d.assocSeason) setAssocSeason(d.assocSeason);
+    if (d.assocLogo)   setAssocLogo(d.assocLogo);
+    if (d.teams)       setTeams(d.teams);
+    if (d.stats)       setStats(d.stats);
+    if (d.players)     setPlayers(d.players);
+    if (d.matches)     setMatches(d.matches);
+    if (d.scorers)     setScorers(d.scorers);
+  };
+
+  // Viewer: load from Firebase on open
+  useEffect(() => {
+    if (!isViewer) return;
+    setCloudStatus("syncing");
+    cloudPull().then(d => {
+      if (!d) { setCloudStatus("error"); return; }
+      applyCloudData(d);
+      setCloudStatus("synced");
+    });
+  }, []);
+
+  // Viewer: auto-refresh every 30s
+  useEffect(() => {
+    if (!isViewer) return;
+    const interval = setInterval(() => {
+      cloudPull().then(d => {
+        if (!d) return;
+        applyCloudData(d);
+        setCloudStatus("synced");
+      });
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [isViewer]);
+
+  // Admin: auto-push to Firebase on any data change (debounced 1.5s)
+  useEffect(() => {
+    if (!isAdmin || isViewer || !cloudReady) return;
+    setCloudStatus("syncing");
+    const t = setTimeout(() => {
+      cloudPush({assocName,assocSeason,assocLogo,teams,stats,players,matches,scorers})
+        .then(ok => setCloudStatus(ok ? "synced" : "error"));
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [adminPw,assocName,assocSeason,assocLogo,teams,stats,players,matches,scorers,isAdmin,cloudReady]);
+
+  // First-time cloud activation
+  const doCloudActivate = async () => {
+    setCloudSetupStep("creating");
+    // Save API key to localStorage for future updates
+    try { if (cloudApiKey) localStorage.setItem("smfa_api_key", cloudApiKey); } catch {}
+    const ok = await cloudPush({assocName,assocSeason,assocLogo,teams,stats,players,matches,scorers}, cloudApiKey);
+    if (ok) {
+      setCloudReady_state(true);
+      setCloudStatus("synced");
+      setCloudSetupStep("done");
+      setCloudBinId(getBinId());
+    } else {
+      setCloudSetupStep("fail");
+    }
+  };
+
+  const doShare = () => {
+    const link = getPublicLink();
+    const msg = "⚽ Live league table – " + assocName + " " + assocSeason;
+    if (navigator.share) {
+      navigator.share({title: assocName + " League", text: msg, url: link}).catch(()=>{});
+    } else {
+      navigator.clipboard.writeText(link).then(()=>{setCopyOk(true);setTimeout(()=>setCopyOk(false),3000);});
+    }
+  };
+  const copyLink = () => {
+    navigator.clipboard.writeText(getPublicLink()).then(()=>{setCopyOk(true);setTimeout(()=>setCopyOk(false),3000);});
+  };
+
+  // ── Auth
+  const doLogin = () => {
+    if (loginInput === adminPw) { setIsAdmin(true); setShowLogin(false); setLoginInput(""); setLoginErr(""); toast("Admin mode activated"); }
+    else setLoginErr("Wrong password.");
+  };
+  const doChangePw = () => {
+    if (!pwNew) return setPwErr("Password cannot be empty.");
+    if (pwNew !== pwConfirm) return setPwErr("Passwords don't match.");
+    setAdminPw(pwNew); setPwNew(""); setPwConfirm(""); setPwErr(""); setShowPwChange(false); toast("Password changed!");
+  };
+
+  // ── League table
+  const table = [...teams].map(t => {
+    const s = stats[t.id] || {played:0,won:0,drawn:0,lost:0,goalsFor:0,goalsAgainst:0,pointsDeducted:0};
+    return {...t,...s, pts:s.won*3+s.drawn-(s.pointsDeducted||0), gd:s.goalsFor-s.goalsAgainst};
+  }).sort((a,b)=>b.pts-a.pts||b.gd-a.gd||b.goalsFor-a.goalsFor);
+
+  // ── CRUD
+  const addTeam = () => {
+    if (!newTeam.name||!newTeam.shortName) return toast("Fill team name & short name","err");
+    const id = Date.now();
+    setTeams(p=>[...p,{...newTeam,id}]);
+    setStats(p=>({...p,[id]:{played:0,won:0,drawn:0,lost:0,goalsFor:0,goalsAgainst:0,pointsDeducted:0}}));
+    setPlayers(p=>({...p,[id]:[]}));
+    setNewTeam({name:"",shortName:"",color:"#16a34a",logo:null}); setModalAddTeam(false); toast(`${newTeam.name} added!`);
+  };
+  const updateTeam = (id, patch) => setTeams(p=>p.map(t=>t.id===id?{...t,...patch}:t));
+  const saveEditTeam = () => {
+    if (!modalEditTeam.name||!modalEditTeam.shortName) return toast("Fill name & short name","err");
+    updateTeam(modalEditTeam.id, modalEditTeam);
+    setModalEditTeam(null); toast("Team updated!");
+  };
+  const removeTeam = id => {
+    setTeams(p=>p.filter(t=>t.id!==id));
+    setStats(p=>{const n={...p};delete n[id];return n;});
+    setPlayers(p=>{const n={...p};delete n[id];return n;});
+    setMatches(p=>p.filter(m=>m.homeTeamId!==id&&m.awayTeamId!==id));
+    toast("Team removed.");
+  };
+
+  const addPlayer = () => {
+    if (!newPlayer.name||!newPlayer.age) return toast("Fill name & age","err");
+    const id = Date.now();
+    setPlayers(p=>({...p,[selTeamId]:[...(p[selTeamId]||[]),{...newPlayer,id,age:+newPlayer.age}]}));
+    setNewPlayer({name:"",age:"",position:"Midfielder",photo:null}); setModalAddPlayer(false); toast(`${newPlayer.name} registered!`);
+  };
+  const updatePlayer = (teamId, playerId, patch) => setPlayers(p=>({...p,[teamId]:p[teamId].map(pl=>pl.id===playerId?{...pl,...patch}:pl)}));
+  const removePlayer = (teamId, playerId) => { setPlayers(p=>({...p,[teamId]:p[teamId].filter(pl=>pl.id!==playerId)})); toast("Player removed."); };
+
+  const addMatch = () => {
+    if (!newMatch.date||+newMatch.homeTeamId===+newMatch.awayTeamId) return toast("Fill valid match details","err");
+    const played = newMatch.homeScore!==""&&newMatch.awayScore!=="";
+    setMatches(p=>[...p,{...newMatch,id:Date.now(),homeTeamId:+newMatch.homeTeamId,awayTeamId:+newMatch.awayTeamId,homeScore:played?+newMatch.homeScore:null,awayScore:played?+newMatch.awayScore:null,round:+newMatch.round||p.length+1,played}]);
+    setNewMatch({homeTeamId:teams[0]?.id,awayTeamId:teams[1]?.id,homeScore:"",awayScore:"",date:"",round:""}); setModalAddMatch(false); toast("Match added!");
+  };
+  const removeMatch = id => { setMatches(p=>p.filter(m=>m.id!==id)); toast("Match removed."); };
+
+  const addScorer = () => {
+    if (!newScorer.playerName) return toast("Enter player name","err");
+    setScorers(p=>[...p,{...newScorer,id:Date.now(),teamId:+newScorer.teamId,goals:+newScorer.goals,assists:+newScorer.assists,yellowCards:+newScorer.yellowCards,redCards:+newScorer.redCards}]);
+    setNewScorer({teamId:teams[0]?.id,playerName:"",goals:0,assists:0,yellowCards:0,redCards:0}); setModalAddScorer(false); toast("Stats added!");
+  };
+  const removeScorer = id => { setScorers(p=>p.filter(s=>s.id!==id)); toast("Scorer removed."); };
+
+  const assignSlot = (idx, pid) => setLineup(prev=>{
+    const n={...prev};
+    Object.keys(n).forEach(k=>{if(n[k]===pid)delete n[k];});
+    if(pid) n[idx]=pid; else delete n[idx]; return n;
+  });
+
+  // ── Derived
+  const luTeam     = teams.find(t=>t.id===luTeamId);
+  const luPlayers  = players[luTeamId]||[];
+  const fSlots     = FPOS[luForm]||[];
+  const selTeam    = teams.find(t=>t.id===selTeamId);
+  const selPlayers = players[selTeamId]||[];
+  const filteredMatches = matches.filter(m=>matchFilter==="played"?m.played:matchFilter==="upcoming"?!m.played:true).sort((a,b)=>new Date(a.date)-new Date(b.date));
+  const sortedScorers   = [...scorers].sort((a,b)=>scorerSort==="goals"?b.goals-a.goals:scorerSort==="assists"?b.assists-a.assists:(b.yellowCards+b.redCards*3)-(a.yellowCards+a.redCards*3));
+
+  // ─── Design tokens ────────────────────────────────────────────
+  const C = {
+    bg:"#080f0a", card:"#0c1a0e", border:"#1c3d22",
+    green:"#22c55e", greenDim:"#16a34a", text:"#e2f4e8",
+    muted:"#5a7a62", accent:"#facc15"
+  };
+  const css = {
+    app:  {minHeight:"100vh",background:C.bg,color:C.text,fontFamily:"'DM Sans',sans-serif",overflowX:"hidden"},
+    hdr:  {background:"linear-gradient(135deg,#0c1f0f,#091408)",borderBottom:`1px solid ${C.border}`,padding:"0 20px",position:"sticky",top:0,zIndex:100,boxShadow:"0 2px 24px #00000066"},
+    hdrIn:{maxWidth:1280,margin:"0 auto",display:"flex",alignItems:"center",gap:12,padding:"11px 0",flexWrap:"wrap"},
+    main: {maxWidth:1280,margin:"0 auto",padding:"24px 20px"},
+    card: {background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:20,marginBottom:16},
+    title:{fontFamily:"'Bebas Neue',sans-serif",fontSize:26,color:C.green,letterSpacing:3,marginBottom:4},
+    sub:  {color:C.muted,fontSize:13,marginBottom:20},
+    tbl:  {width:"100%",borderCollapse:"collapse",fontSize:14},
+    th:   {padding:"10px 9px",fontFamily:"'Bebas Neue',sans-serif",fontSize:13,letterSpacing:2,color:C.green,textTransform:"uppercase",borderBottom:`2px solid ${C.border}`,textAlign:"center"},
+    thL:  {padding:"10px 9px",fontFamily:"'Bebas Neue',sans-serif",fontSize:13,letterSpacing:2,color:C.green,textTransform:"uppercase",borderBottom:`2px solid ${C.border}`,textAlign:"left"},
+    td:   {padding:"11px 9px",textAlign:"center",borderBottom:`1px solid ${C.border}55`,color:C.text,fontSize:13},
+    tdL:  {padding:"11px 9px",textAlign:"left",borderBottom:`1px solid ${C.border}55`,color:C.text,fontSize:13},
+    inp:  {width:"100%",padding:"10px 13px",background:"#0a160c",border:`1px solid ${C.border}`,borderRadius:8,color:C.text,fontSize:14,outline:"none",boxSizing:"border-box",fontFamily:"'DM Sans',sans-serif"},
+    lbl:  {display:"block",fontSize:10,fontFamily:"'Bebas Neue',sans-serif",letterSpacing:1.5,color:C.green,textTransform:"uppercase",marginBottom:5},
+    modal:{position:"fixed",inset:0,background:"rgba(0,0,0,0.88)",zIndex:300,display:"flex",alignItems:"center",justifyContent:"center",padding:16,overflowY:"auto"},
+    mbox: {background:"#0c1a0e",border:`1px solid ${C.border}`,borderRadius:16,padding:26,width:"100%",maxWidth:440,boxShadow:"0 24px 64px #00000099",margin:"auto"},
+    ntf:  (t)=>({position:"fixed",bottom:24,right:24,padding:"11px 18px",borderRadius:10,zIndex:400,fontSize:13,fontWeight:600,boxShadow:"0 8px 24px #00000066",...(t==="err"?{background:"#450a0a",border:"1px solid #ef4444",color:"#fca5a5"}:{background:"#052e16",border:`1px solid ${C.green}`,color:C.green})}),
+  };
+  const btn = (v="p") => ({padding:"9px 18px",border:"none",cursor:"pointer",fontFamily:"'Bebas Neue',sans-serif",fontWeight:400,fontSize:14,letterSpacing:1.5,textTransform:"uppercase",borderRadius:8,transition:"all .18s",...(
+    v==="p"  ?{background:`linear-gradient(135deg,${C.greenDim},#15803d)`,color:"#fff",boxShadow:`0 4px 14px ${C.greenDim}44`}:
+    v==="g"  ?{background:"transparent",color:C.muted,border:`1px solid ${C.border}`}:
+    v==="d"  ?{background:"transparent",color:"#ef4444",border:"1px solid #ef444455"}:
+    v==="gold"?{background:"linear-gradient(135deg,#d97706,#92400e)",color:"#fff"}:
+              {background:"transparent",color:C.green,border:`1px solid ${C.green}55`}
+  )});
+  const navBtn = (active) => ({padding:"7px 13px",borderRadius:7,border:"none",cursor:"pointer",fontFamily:"'Bebas Neue',sans-serif",fontSize:13,letterSpacing:1.5,textTransform:"uppercase",transition:"all .18s",background:active?C.greenDim:"transparent",color:active?"#fff":C.muted,boxShadow:active?`0 0 14px ${C.greenDim}55`:"none"});
+  const pos3 = (i) => ({width:24,height:24,borderRadius:"50%",background:i===1?"#d97706":i===2?"#71717a":i===3?"#a16207":"#1c3d22",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:900,color:"#fff",margin:"0 auto",fontFamily:"'Bebas Neue',sans-serif"});
+  const tabPill = (active, color="#22c55e") => ({padding:"8px 14px",borderRadius:8,border:`1px solid ${active?color:C.border}`,cursor:"pointer",background:active?`${color}22`:"transparent",color:active?color:C.muted,fontFamily:"'Bebas Neue',sans-serif",fontSize:13,letterSpacing:1,transition:"all .18s",display:"flex",alignItems:"center",gap:6});
+
+  // ════════════════════════════════════════════════════════════════
+  return (
+    <div style={css.app}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@400;500;600;700&display=swap');
+        *{box-sizing:border-box;margin:0;padding:0;}
+        ::-webkit-scrollbar{width:5px;} ::-webkit-scrollbar-track{background:#080f0a;} ::-webkit-scrollbar-thumb{background:#1c3d22;border-radius:4px;}
+        input[type=color]{width:42px;height:34px;border-radius:6px;border:1px solid #1c3d22;background:none;cursor:pointer;padding:2px;}
+        tr:hover td{background:rgba(34,197,94,.04);}
+        .hov:hover{filter:brightness(1.12);transform:translateY(-1px);}
+        .hov:active{transform:translateY(0);}
+        @keyframes fadeIn{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:translateY(0);}}
+        select option{background:#0c1a0e;}
+        .pill-active{background:#22c55e22!important;border-color:#22c55e!important;color:#22c55e!important;}
+        .uploadzone{border:2px dashed #1c3d22;border-radius:10px;padding:16px;text-align:center;cursor:pointer;transition:all .2s;}
+        .uploadzone:hover{border-color:#22c55e;background:#22c55e0a;}
+        .edit-row:hover{background:#22c55e08!important;}
+        .score-badge{padding:3px 9px;border-radius:20px;font-family:'Bebas Neue',sans-serif;font-size:11px;letter-spacing:1px;}
+        .photo-hover:hover .photo-overlay{opacity:1!important;}
+      `}</style>
+
+      {/* VIEWER BANNER */}
+      {isViewer && <div style={{background:"#052e16",borderBottom:`1px solid ${C.green}44`,padding:"6px 20px",textAlign:"center",fontSize:11,color:C.green,fontFamily:"'Bebas Neue',sans-serif",letterSpacing:2,display:"flex",alignItems:"center",justifyContent:"center",gap:10,flexWrap:"wrap"}}>
+        👁 LIVE VIEW — {assocName}
+        {cloudStatus==="syncing" && <span style={{color:C.accent}}>⏳ Loading…</span>}
+        {cloudStatus==="synced"  && <span style={{color:"#4ade80"}}>🟢 Live & Up to Date</span>}
+        {cloudStatus==="error"   && <span style={{color:"#f87171"}}>⚠️ Offline – showing cached data</span>}
+        <button onClick={()=>{ setCloudStatus("syncing"); cloudPull().then(d=>{ if(d){applyCloudData(d);setCloudStatus("synced");} else setCloudStatus("error"); }); }} style={{background:"transparent",border:`1px solid ${C.green}44`,borderRadius:5,color:C.green,fontSize:10,padding:"2px 8px",cursor:"pointer",fontFamily:"'Bebas Neue',sans-serif",letterSpacing:1}}>🔄 REFRESH</button>
+      </div>}
+      {isAdmin && !isViewer && <div style={{background:"#0f2d17",borderBottom:`1px solid ${C.greenDim}`,padding:"5px 20px",textAlign:"center",fontSize:11,color:"#86efac",fontFamily:"'Bebas Neue',sans-serif",letterSpacing:2,display:"flex",alignItems:"center",justifyContent:"center",gap:10,flexWrap:"wrap"}}>
+        🔐 ADMIN MODE
+        {!cloudReady && <><span style={{color:"#fb923c"}}>⚠️ Cloud not activated —</span><button onClick={()=>setModalCloudSetup(true)} style={{background:"linear-gradient(135deg,#d97706,#92400e)",border:"none",borderRadius:5,color:"#fff",fontSize:10,padding:"2px 10px",cursor:"pointer",fontFamily:"'Bebas Neue',sans-serif",letterSpacing:1}}>ACTIVATE NOW</button></>}
+        {cloudReady && cloudStatus==="syncing" && <span style={{color:C.accent}}>⏳ Syncing to cloud…</span>}
+        {cloudReady && cloudStatus==="synced"  && <span style={{color:"#4ade80"}}>☁️ Cloud synced — all shared links updated</span>}
+        {cloudReady && cloudStatus==="error"   && <span style={{color:"#f87171"}}>⚠️ Sync failed — <button onClick={()=>{ cloudPush({assocName,assocSeason,assocLogo,teams,stats,players,matches,scorers}).then(ok=>setCloudStatus(ok?"synced":"error")); setCloudStatus("syncing"); }} style={{background:"none",border:"none",color:"#fb923c",cursor:"pointer",fontSize:11,textDecoration:"underline",padding:0,fontFamily:"inherit"}}>retry</button></span>}
+        {cloudReady && cloudStatus==="idle"    && <span style={{color:C.muted}}>Changes save automatically</span>}
+      </div>}
+
+      {/* HEADER */}
+      <header style={css.hdr}>
+        <div style={css.hdrIn}>
+          {/* Assoc Logo */}
+          <div style={{position:"relative",flexShrink:0,cursor:isAdmin&&!isViewer?"pointer":"default"}} onClick={()=>isAdmin&&!isViewer&&setModalAssoc(true)} title={isAdmin&&!isViewer?"Edit association":""}> 
+            {assocLogo
+              ? <img src={assocLogo} alt={assocName} style={{width:46,height:46,borderRadius:12,objectFit:"cover",border:`2px solid ${C.green}44`,boxShadow:`0 0 18px ${C.greenDim}55`}}/>
+              : <div style={{width:46,height:46,borderRadius:12,background:`linear-gradient(135deg,${C.greenDim},#166534)`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0,boxShadow:`0 0 18px ${C.greenDim}55`}}>⚽</div>}
+            {isAdmin&&!isViewer&&<div style={{position:"absolute",bottom:-3,right:-3,width:16,height:16,borderRadius:"50%",background:C.greenDim,display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,color:"#fff"}}>✏️</div>}
+          </div>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:18,color:C.green,letterSpacing:2,lineHeight:1.1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{assocName}</div>
+            <div style={{fontSize:10,color:C.muted,letterSpacing:2,textTransform:"uppercase"}}>Season {assocSeason} · League Management System</div>
+          </div>
+          <nav style={{display:"flex",gap:3,marginLeft:"auto",flexWrap:"wrap",alignItems:"center"}}>
+            {[
+              {k:"table",    l:"🏆 Table"},
+              {k:"fixtures", l:"⚽ Fixtures"},
+              {k:"awards",   l:"🏅 Awards"},
+              {k:"lineup",   l:"📋 Lineup"},
+              {k:"teams",    l:"👥 Teams"},
+              {k:"print",    l:"🖨️ Print"},
+              ...(isAdmin&&!isViewer?[{k:"edit",l:"✏️ Edit"}]:[]),
+            ].map(({k,l})=><button key={k} style={navBtn(tab===k)} className="hov" onClick={()=>setTab(k)}>{l}</button>)}
+            <button className="hov" style={{...btn("gold"),padding:"7px 12px",fontSize:12,letterSpacing:1}} onClick={()=>setModalShare(true)}>🔗 Share</button>
+            {!isViewer && (isAdmin
+              ? <button className="hov" style={{...btn("g"),padding:"7px 12px",fontSize:12}} onClick={()=>{setIsAdmin(false);toast("Logged out.","ok");}}>🔓 Logout</button>
+              : <button className="hov" style={{...btn("g"),padding:"7px 12px",fontSize:12}} onClick={()=>setShowLogin(true)}>🔐 Admin</button>
+            )}
+          </nav>
+        </div>
+      </header>
+
+      <main style={css.main}>
+
+        {/* ══ TABLE ══════════════════════════════════════════════════ */}
+        {tab==="table" && (
+          <div>
+            <div style={css.title}>League Standings</div>
+            <div style={css.sub}>{assocName} · {assocSeason} Season · {teams.length} Clubs</div>
+            <div style={css.card}>
+              <div style={{overflowX:"auto"}}>
+                <table style={css.tbl}>
+                  <thead>
+                    <tr>
+                      {["#","Club","MP","W","D","L","GF","GA","GD","-Pts","PTS"].map((h,i)=>(
+                        <th key={i} style={i<=1?{...css.thL,minWidth:i===1?180:40}:css.th}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {table.map((t,i)=>(
+                      <tr key={t.id} style={{background:i<3?`${t.color}09`:"transparent"}}>
+                        <td style={css.tdL}><div style={pos3(i+1)}>{i+1}</div></td>
+                        <td style={css.tdL}>
+                          <div style={{display:"flex",alignItems:"center",gap:9}}>
+                            <TeamLogo logo={t.logo} name={t.name} color={t.color} size={28}/>
+                            <div>
+                              <div style={{fontFamily:"'Bebas Neue',sans-serif",color:t.color,fontSize:14,letterSpacing:.5}}>{t.name}</div>
+                              <div style={{fontSize:10,color:C.muted}}>{t.shortName}</div>
+                            </div>
+                          </div>
+                        </td>
+                        <td style={css.td}>{t.played}</td>
+                        <td style={{...css.td,color:"#4ade80"}}>{t.won}</td>
+                        <td style={css.td}>{t.drawn}</td>
+                        <td style={{...css.td,color:"#f87171"}}>{t.lost}</td>
+                        <td style={css.td}>{t.goalsFor}</td>
+                        <td style={css.td}>{t.goalsAgainst}</td>
+                        <td style={{...css.td,color:t.gd>0?"#4ade80":t.gd<0?"#f87171":C.muted}}>{t.gd>0?`+${t.gd}`:t.gd}</td>
+                        <td style={{...css.td,color:t.pointsDeducted>0?"#f87171":C.muted}}>{t.pointsDeducted>0?`-${t.pointsDeducted}`:"—"}</td>
+                        <td style={{...css.td,fontFamily:"'Bebas Neue',sans-serif",fontSize:20,color:C.accent}}>{t.pts}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{marginTop:14,display:"flex",gap:10,flexWrap:"wrap"}}>
+                {["MP=Played","W=Won","D=Drawn","L=Lost","GF=Goals For","GA=Goals Against","GD=Diff","-Pts=Deducted","PTS=Total"].map(l=>(
+                  <span key={l} style={{padding:"3px 8px",background:"#0a160c",borderRadius:5,fontSize:10,color:C.muted}}>{l}</span>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ══ FIXTURES ════════════════════════════════════════════════ */}
+        {tab==="fixtures" && (
+          <div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:16,flexWrap:"wrap",gap:10}}>
+              <div><div style={css.title}>Fixtures & Results</div><div style={css.sub}>{assocSeason} · All Rounds</div></div>
+              {isAdmin && <button className="hov" style={btn()} onClick={()=>setModalAddMatch(true)}>+ Add Match</button>}
+            </div>
+            <div style={{display:"flex",gap:7,marginBottom:18}}>
+              {[["all","All"],["played","Results"],["upcoming","Upcoming"]].map(([v,l])=>(
+                <button key={v} onClick={()=>setMatchFilter(v)} style={{...tabPill(matchFilter===v),padding:"6px 14px",fontSize:12}}>{l}</button>
+              ))}
+            </div>
+            {[...new Set(filteredMatches.map(m=>m.round))].sort((a,b)=>a-b).map(round=>(
+              <div key={round} style={{marginBottom:20}}>
+                <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:9}}>
+                  <div style={{height:1,flex:1,background:C.border}}/>
+                  <span style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:12,letterSpacing:2,color:C.muted}}>ROUND {round}</span>
+                  <div style={{height:1,flex:1,background:C.border}}/>
+                </div>
+                {filteredMatches.filter(m=>m.round===round).map(m=>{
+                  const H=teams.find(t=>t.id===m.homeTeamId), A=teams.find(t=>t.id===m.awayTeamId);
+                  if(!H||!A) return null;
+                  const HW=m.played&&m.homeScore>m.awayScore, AW=m.played&&m.awayScore>m.homeScore;
+                  return (
+                    <div key={m.id} style={{...css.card,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",padding:"14px 16px",marginBottom:8}}>
+                      <div style={{flex:1,display:"flex",alignItems:"center",gap:8,justifyContent:"flex-end",minWidth:120}}>
+                        <div style={{textAlign:"right"}}>
+                          <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:15,color:HW?H.color:C.text,letterSpacing:.5}}>{H.name}</div>
+                          <div style={{fontSize:10,color:C.muted}}>{H.shortName}</div>
+                        </div>
+                        <TeamLogo logo={H.logo} name={H.name} color={H.color} size={32}/>
+                      </div>
+                      <div style={{textAlign:"center",minWidth:90}}>
+                        {m.played
+                          ? <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:28,color:C.accent,letterSpacing:4}}>{m.homeScore} — {m.awayScore}</div>
+                          : <><div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:17,color:C.green,letterSpacing:2}}>VS</div><div style={{fontSize:10,color:C.muted}}>{m.date}</div></>}
+                        {m.played && <div style={{fontSize:10,color:C.muted}}>{m.date}</div>}
+                      </div>
+                      <div style={{flex:1,display:"flex",alignItems:"center",gap:8,minWidth:120}}>
+                        <TeamLogo logo={A.logo} name={A.name} color={A.color} size={32}/>
+                        <div>
+                          <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:15,color:AW?A.color:C.text,letterSpacing:.5}}>{A.name}</div>
+                          <div style={{fontSize:10,color:C.muted}}>{A.shortName}</div>
+                        </div>
+                      </div>
+                      <span className="score-badge" style={{background:m.played?"#052e16":"#0c1a0e",color:m.played?C.green:C.muted,border:`1px solid ${m.played?C.greenDim:C.border}`}}>{m.played?"FT":"SOON"}</span>
+                      {isAdmin && <button style={{...btn("d"),padding:"4px 8px",fontSize:13,marginLeft:4}} onClick={()=>removeMatch(m.id)}>×</button>}
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+            {filteredMatches.length===0 && <div style={{...css.card,textAlign:"center",padding:40,color:C.muted}}>No matches found.</div>}
+          </div>
+        )}
+
+        {/* ══ AWARDS ══════════════════════════════════════════════════ */}
+        {tab==="awards" && (
+          <div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:16,flexWrap:"wrap",gap:10}}>
+              <div><div style={css.title}>Awards & Stats</div><div style={css.sub}>Player performance · 2025/26</div></div>
+              {isAdmin && <button className="hov" style={btn()} onClick={()=>setModalAddScorer(true)}>+ Add Stats</button>}
+            </div>
+            {scorers.length>0 && (
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(190px,1fr))",gap:12,marginBottom:22}}>
+                {[
+                  {label:"Golden Boot",icon:"🥇",color:"#d97706",key:"goals",   unit:"goals",  topFn:a=>b=>b.goals-a.goals},
+                  {label:"Playmaker",  icon:"🎯",color:"#3b82f6",key:"assists", unit:"assists", topFn:a=>b=>b.assists-a.assists},
+                  {label:"Iron Man",   icon:"💪",color:"#22c55e",key:"combined",unit:"G+A",     topFn:a=>b=>(b.goals+b.assists)-(a.goals+a.assists)},
+                ].map(aw=>{
+                  const top=[...scorers].sort((a,b)=>aw.topFn(a)(b))[0];
+                  const tm=top?teams.find(t=>t.id===top.teamId):null;
+                  return (
+                    <div key={aw.label} style={{background:`linear-gradient(135deg,${aw.color}0f,${C.bg})`,border:`1px solid ${aw.color}33`,borderRadius:14,padding:16,textAlign:"center"}}>
+                      <div style={{fontSize:26,marginBottom:6}}>{aw.icon}</div>
+                      <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:11,letterSpacing:2,color:aw.color,marginBottom:6}}>{aw.label}</div>
+                      {top?<>
+                        <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:15,color:C.text,marginBottom:2}}>{top.playerName}</div>
+                        <div style={{fontSize:11,color:C.muted,marginBottom:7}}>{tm?.name}</div>
+                        <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:26,color:aw.color}}>{aw.key==="combined"?top.goals+top.assists:top[aw.key]}</div>
+                        <div style={{fontSize:10,color:C.muted}}>{aw.unit}</div>
+                      </>:<div style={{color:C.muted,fontSize:12}}>No data</div>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            <div style={{display:"flex",gap:7,marginBottom:14}}>
+              {[["goals","⚽ Goals"],["assists","🎯 Assists"],["cards","🟨 Cards"]].map(([k,l])=>(
+                <button key={k} style={tabPill(scorerSort===k)} onClick={()=>setScorerSort(k)}>{l}</button>
+              ))}
+            </div>
+            <div style={css.card}>
+              <table style={css.tbl}>
+                <thead><tr>
+                  <th style={{...css.th,width:36}}>#</th>
+                  <th style={css.thL}>Player</th>
+                  <th style={css.thL}>Club</th>
+                  <th style={css.th}>⚽</th><th style={css.th}>🎯</th><th style={css.th}>🟨</th><th style={css.th}>🟥</th>
+                  {isAdmin&&<th style={css.th}></th>}
+                </tr></thead>
+                <tbody>
+                  {sortedScorers.map((s,i)=>{
+                    const tm=teams.find(t=>t.id===s.teamId);
+                    return (
+                      <tr key={s.id}>
+                        <td style={css.td}>{i<3?<div style={pos3(i+1)}>{i+1}</div>:<span style={{color:C.muted}}>{i+1}</span>}</td>
+                        <td style={css.tdL}><span style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:14,letterSpacing:.5}}>{s.playerName}</span></td>
+                        <td style={css.tdL}><div style={{display:"flex",alignItems:"center",gap:7}}>{tm&&<TeamLogo logo={tm.logo} name={tm.name} color={tm.color} size={20}/>}<span style={{fontSize:11,color:tm?.color||C.muted}}>{tm?.shortName}</span></div></td>
+                        <td style={{...css.td,fontFamily:"'Bebas Neue',sans-serif",fontSize:17,color:scorerSort==="goals"?C.accent:C.text}}>{s.goals}</td>
+                        <td style={{...css.td,fontFamily:"'Bebas Neue',sans-serif",fontSize:17,color:scorerSort==="assists"?"#3b82f6":C.text}}>{s.assists}</td>
+                        <td style={{...css.td,color:"#eab308"}}>{s.yellowCards}</td>
+                        <td style={{...css.td,color:"#ef4444"}}>{s.redCards}</td>
+                        {isAdmin&&<td style={css.td}><button style={{...btn("d"),padding:"3px 8px",fontSize:12}} onClick={()=>removeScorer(s.id)}>×</button></td>}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {sortedScorers.length===0&&<div style={{textAlign:"center",padding:24,color:C.muted}}>No stats yet.</div>}
+            </div>
+          </div>
+        )}
+
+        {/* ══ LINEUP ══════════════════════════════════════════════════ */}
+        {tab==="lineup" && (
+          <div>
+            <div style={css.title}>Match Day Lineup</div>
+            <div style={css.sub}>Build your starting XI on the pitch</div>
+            <div style={{display:"flex",gap:10,marginBottom:18,flexWrap:"wrap",alignItems:"flex-end"}}>
+              <div>
+                <div style={css.lbl}>Team</div>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                  {teams.map(t=>(
+                    <button key={t.id} style={tabPill(luTeamId===t.id,t.color)} className="hov" onClick={()=>{setLuTeamId(t.id);setLineup({});}}>
+                      <TeamLogo logo={t.logo} name={t.name} color={t.color} size={18}/>{t.shortName}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <div style={css.lbl}>Formation</div>
+                <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                  {FORMATIONS.map(f=>(
+                    <button key={f} style={tabPill(luForm===f,luTeam?.color||C.green)} className="hov" onClick={()=>{setLuForm(f);setLineup({});}}>{f}</button>
+                  ))}
+                </div>
+              </div>
+              <button className="hov" style={{...btn("g"),marginTop:16}} onClick={()=>setLineup({})}>🔄 Clear</button>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 250px",gap:16,alignItems:"start"}}>
+              <div style={{position:"relative",paddingBottom:"140%",background:"linear-gradient(180deg,#082010,#0a2a14 30%,#082010 60%,#0a2a14 100%)",borderRadius:16,border:`2px solid ${luTeam?.color||C.green}44`,overflow:"hidden",boxShadow:"0 0 32px #00000066"}}>
+                <svg style={{position:"absolute",inset:0,width:"100%",height:"100%"}} viewBox="0 0 100 140" preserveAspectRatio="none">
+                  {[0,1,2,3,4,5,6].map(i=><rect key={i} x="0" y={i*20} width="100" height="10" fill={i%2===0?"rgba(255,255,255,0.018)":"transparent"}/>)}
+                  <rect x="5" y="4" width="90" height="132" fill="none" stroke="rgba(255,255,255,0.12)" strokeWidth="0.5"/>
+                  <line x1="5" y1="70" x2="95" y2="70" stroke="rgba(255,255,255,0.12)" strokeWidth="0.5"/>
+                  <circle cx="50" cy="70" r="12" fill="none" stroke="rgba(255,255,255,0.12)" strokeWidth="0.5"/>
+                  <circle cx="50" cy="70" r="0.8" fill="rgba(255,255,255,0.25)"/>
+                  <rect x="25" y="4" width="50" height="22" fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="0.5"/>
+                  <rect x="35" y="4" width="30" height="10" fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="0.5"/>
+                  <rect x="25" y="114" width="50" height="22" fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="0.5"/>
+                  <rect x="35" y="126" width="30" height="10" fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="0.5"/>
+                </svg>
+                {fSlots.map((sl,idx)=>{
+                  const pid=lineup[idx], pl=luPlayers.find(p=>p.id===pid), color=luTeam?.color||C.green;
+                  return (
+                    <div key={idx} style={{position:"absolute",left:`${sl.x}%`,top:`${sl.y}%`,transform:"translate(-50%,-50%)",textAlign:"center",zIndex:10,cursor:"pointer"}} className="hov"
+                      onClick={()=>{
+                        const taken=Object.values(lineup), avail=luPlayers.filter(p=>!taken.includes(p.id)||p.id===pid);
+                        if(!pl){if(avail.length>0)assignSlot(idx,avail[0].id);}
+                        else{const ci=avail.findIndex(p=>p.id===pl.id);const nx=avail[ci+1];assignSlot(idx,nx?nx.id:undefined);}
+                      }}>
+                      <div style={{width:44,height:44,borderRadius:"50%",background:pl?`linear-gradient(135deg,${color}cc,${color}55)`:"rgba(0,0,0,0.5)",border:`2px solid ${pl?color:"rgba(255,255,255,0.15)"}`,display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto",boxShadow:pl?`0 0 14px ${color}55`:"none",overflow:"hidden",transition:"all .15s"}}>
+                        {pl?.photo
+                          ? <img src={pl.photo} alt={pl.name} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+                          : pl ? <span style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:11,color:"#fff",letterSpacing:.5}}>{initials(pl.name)}</span>
+                               : <span style={{fontSize:12,color:"rgba(255,255,255,0.2)"}}>+</span>}
+                      </div>
+                      <div style={{marginTop:3}}>
+                        <span style={{fontSize:8,fontFamily:"'Bebas Neue',sans-serif",color:pl?"#fff":"rgba(255,255,255,0.2)",background:pl?`${color}cc`:"rgba(0,0,0,0.55)",padding:"1px 5px",borderRadius:4,display:"inline-block",maxWidth:55,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",letterSpacing:.5}}>
+                          {pl?pl.name.split(" ")[0]:sl.s}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+                <div style={{position:"absolute",top:7,left:"50%",transform:"translateX(-50%)",fontFamily:"'Bebas Neue',sans-serif",fontSize:11,letterSpacing:2,color:"rgba(255,255,255,0.2)",zIndex:20}}>{luForm}</div>
+              </div>
+              <div>
+                <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:12,letterSpacing:2,color:C.green,marginBottom:10}}>SQUAD ({luPlayers.length})</div>
+                <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                  {luPlayers.length===0
+                    ? <div style={{color:C.muted,fontSize:12,padding:16,textAlign:"center"}}>No players in squad.</div>
+                    : luPlayers.map(p=>{
+                        const inLU=Object.values(lineup).includes(p.id);
+                        return (
+                          <div key={p.id} style={{background:inLU?`${luTeam?.color||C.green}18`:C.card,border:`1px solid ${inLU?luTeam?.color||C.green:C.border}`,borderRadius:8,padding:"8px 10px",display:"flex",alignItems:"center",gap:8,opacity:inLU?1:0.55,transition:"all .18s"}}>
+                            <PlayerAvatar photo={p.photo} name={p.name} color={luTeam?.color||C.green} size={28}/>
+                            <div style={{flex:1,minWidth:0}}>
+                              <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:12,color:inLU?C.text:C.muted,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{p.name}</div>
+                              <div style={{fontSize:9,color:C.muted}}>{p.position}</div>
+                            </div>
+                            {inLU&&<div style={{width:7,height:7,borderRadius:"50%",background:luTeam?.color||C.green,flexShrink:0}}/>}
+                          </div>
+                        );
+                      })}
+                </div>
+                <div style={{marginTop:10,fontSize:10,color:C.muted}}>Tap a pitch slot to assign players.</div>
+                <div style={{marginTop:5,fontFamily:"'Bebas Neue',sans-serif",fontSize:13,color:C.green,letterSpacing:1}}>{Object.keys(lineup).length}/11 selected</div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ══ TEAMS ══════════════════════════════════════════════════ */}
+        {tab==="teams" && (
+          <div>
+            <div style={css.title}>Registered Teams</div>
+            <div style={css.sub}>{teams.length} clubs competing in {assocSeason}</div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:13}}>
+              {teams.map(t=>{
+                const s=stats[t.id]||{};
+                const pts=(s.won||0)*3+(s.drawn||0)-(s.pointsDeducted||0);
+                const pc=(players[t.id]||[]).length;
+                return (
+                  <div key={t.id} style={{...css.card,borderColor:t.color+"55",transition:"transform .18s",position:"relative"}} onMouseEnter={e=>e.currentTarget.style.transform="translateY(-3px)"} onMouseLeave={e=>e.currentTarget.style.transform="translateY(0)"}>
+                    {isAdmin && (
+                      <button className="hov" style={{position:"absolute",top:10,right:10,background:"transparent",border:`1px solid ${C.border}`,borderRadius:6,color:C.green,cursor:"pointer",fontSize:12,padding:"3px 8px",fontFamily:"'Bebas Neue',sans-serif",letterSpacing:1}} onClick={()=>setModalEditTeam({...t})}>✏️ Edit</button>
+                    )}
+                    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+                      <TeamLogo logo={t.logo} name={t.name} color={t.color} size={50}/>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontFamily:"'Bebas Neue',sans-serif",color:t.color,fontSize:16,letterSpacing:.5,lineHeight:1.1}}>{t.name}</div>
+                        <div style={{fontSize:10,color:C.muted,letterSpacing:1}}>{t.shortName}</div>
+                      </div>
+                    </div>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,textAlign:"center"}}>
+                      {[["PTS",pts,C.accent],["MP",s.played||0,C.muted],["Squad",pc,C.green]].map(([l,v,c])=>(
+                        <div key={l} style={{background:"#0a160c",borderRadius:7,padding:"7px 3px"}}>
+                          <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:18,color:c}}>{v}</div>
+                          <div style={{fontSize:9,color:C.muted,letterSpacing:1,textTransform:"uppercase"}}>{l}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {(players[t.id]||[]).length>0 && (
+                      <div style={{marginTop:10,display:"flex"}}>
+                        {(players[t.id]||[]).slice(0,6).map((p,i)=>(
+                          <div key={p.id} style={{marginLeft:i>0?-10:0,zIndex:i}}>
+                            <PlayerAvatar photo={p.photo} name={p.name} color={t.color} size={26}/>
+                          </div>
+                        ))}
+                        {(players[t.id]||[]).length>6 && <div style={{width:26,height:26,borderRadius:"50%",background:C.border,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:C.muted,marginLeft:-10}}>+{(players[t.id]||[]).length-6}</div>}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* ══ PRINT ══════════════════════════════════════════════════ */}
+        {tab==="print" && (
+          <div>
+            <div style={css.title}>Print Player Cards</div>
+            <div style={css.sub}>Select a team and print official player ID cards</div>
+
+            {/* Controls */}
+            <div style={{display:"flex",gap:10,marginBottom:20,flexWrap:"wrap",alignItems:"flex-end"}}>
+              <div style={{flex:1,minWidth:200}}>
+                <div style={css.lbl}>Select Team</div>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                  {teams.map(t=>(
+                    <button key={t.id} style={tabPill(printTeamId===t.id,t.color)} className="hov"
+                      onClick={()=>setPrintTeamId(printTeamId===t.id?null:t.id)}>
+                      <TeamLogo logo={t.logo} name={t.name} color={t.color} size={18}/>{t.shortName}
+                      <span style={{background:`${t.color}33`,color:t.color,padding:"1px 6px",borderRadius:20,fontSize:10}}>{(players[t.id]||[]).length}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <button className="hov" style={{...btn("o"),fontSize:12,display:"flex",alignItems:"center",gap:6}}
+                  onClick={()=>setPrintMode(printMode==="cards"?"squad":"cards")}>
+                  {printMode==="cards"?"📋 Switch to Squad Sheet":"🃏 Switch to Cards"}
+                </button>
+                {printTeamId && (
+                  <button className="hov" style={{...btn(),fontSize:13,display:"flex",alignItems:"center",gap:6}} onClick={()=>{
+                    const el = document.getElementById("print-area");
+                    if(!el) return;
+                    const w = window.open("","_blank","width=900,height=700");
+                    w.document.write(`<!DOCTYPE html><html><head><title>Print</title><style>
+                      @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@400;600;700&display=swap');
+                      *{box-sizing:border-box;margin:0;padding:0;}
+                      body{background:#fff;font-family:'DM Sans',sans-serif;}
+                      @media print{body{background:#fff;} .no-print{display:none;}}
+                    </style></head><body>${el.innerHTML}<script>window.onload=()=>{window.print();window.close();}<\/script></body></html>`);
+                    w.document.close();
+                  }}>
+                    🖨️ Print
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Preview area */}
+            {!printTeamId ? (
+              <div style={{...css.card,textAlign:"center",padding:60,color:C.muted}}>
+                <div style={{fontSize:48,marginBottom:12}}>🖨️</div>
+                <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:18,letterSpacing:2,marginBottom:6}}>SELECT A TEAM TO PREVIEW</div>
+                <div style={{fontSize:13}}>Choose a team above to see and print their player cards</div>
+              </div>
+            ) : (() => {
+              const team = teams.find(t=>t.id===printTeamId);
+              const squad = players[printTeamId]||[];
+              const teamStats = stats[printTeamId]||{};
+              const pts = (teamStats.won||0)*3+(teamStats.drawn||0)-(teamStats.pointsDeducted||0);
+              const tablePos = table.findIndex(t=>t.id===printTeamId)+1;
+
+              if(printMode==="squad") return (
+                <div>
+                  <div id="print-area" style={{background:"#fff",borderRadius:12,overflow:"hidden",boxShadow:"0 4px 24px #00000022"}}>
+                    {/* Header */}
+                    <div style={{background:`linear-gradient(135deg,${team.color},${team.color}bb)`,padding:"24px 32px",display:"flex",alignItems:"center",gap:20}}>
+                      <TeamLogo logo={team.logo} name={team.name} color="#fff" size={70}/>
+                      <div>
+                        <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:32,color:"#fff",letterSpacing:2,lineHeight:1}}>{team.name}</div>
+                        <div style={{fontSize:13,color:"rgba(255,255,255,0.8)",letterSpacing:2,marginTop:4}}>{assocName} · {assocSeason}</div>
+                        <div style={{display:"flex",gap:16,marginTop:8}}>
+                          {[["POS",`#${tablePos}`],["PTS",pts],["MP",teamStats.played||0],["W",teamStats.won||0],["D",teamStats.drawn||0],["L",teamStats.lost||0]].map(([l,v])=>(
+                            <div key={l} style={{textAlign:"center"}}>
+                              <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:22,color:"#fff",lineHeight:1}}>{v}</div>
+                              <div style={{fontSize:9,color:"rgba(255,255,255,0.7)",letterSpacing:1}}>{l}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <div style={{marginLeft:"auto",textAlign:"right"}}>
+                        <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:13,color:"rgba(255,255,255,0.7)",letterSpacing:2}}>OFFICIAL SQUAD LIST</div>
+                        <div style={{fontSize:11,color:"rgba(255,255,255,0.6)",marginTop:2}}>{squad.length} registered players</div>
+                      </div>
+                    </div>
+                    {/* Table */}
+                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+                      <thead>
+                        <tr style={{background:`${team.color}15`,borderBottom:`2px solid ${team.color}44`}}>
+                          {["#","Photo","Name","Age","Position"].map((h,i)=>(
+                            <th key={i} style={{padding:"10px 14px",fontFamily:"'Bebas Neue',sans-serif",fontSize:11,letterSpacing:2,color:team.color,textAlign:i<=1?"center":"left"}}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {squad.map((p,i)=>(
+                          <tr key={p.id} style={{borderBottom:"1px solid #eee",background:i%2===0?"#fafafa":"#fff"}}>
+                            <td style={{padding:"10px 14px",textAlign:"center",fontFamily:"'Bebas Neue',sans-serif",fontSize:16,color:team.color}}>{i+1}</td>
+                            <td style={{padding:"8px 14px",textAlign:"center"}}>
+                              <div style={{width:38,height:38,borderRadius:"50%",background:`${team.color}22`,border:`2px solid ${team.color}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:team.color,margin:"0 auto",overflow:"hidden"}}>
+                                {p.photo?<img src={p.photo} alt={p.name} style={{width:"100%",height:"100%",objectFit:"cover"}}/>:initials(p.name)}
+                              </div>
+                            </td>
+                            <td style={{padding:"10px 14px",fontWeight:600,color:"#111"}}>{p.name}</td>
+                            <td style={{padding:"10px 14px",color:"#666"}}>{p.age}</td>
+                            <td style={{padding:"10px 14px"}}>
+                              <span style={{padding:"3px 10px",background:`${team.color}18`,color:team.color,borderRadius:20,fontSize:11,fontWeight:600}}>{p.position}</span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    {/* Footer */}
+                    <div style={{padding:"12px 32px",background:`${team.color}10`,borderTop:`1px solid ${team.color}22`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <div style={{fontSize:10,color:"#999",letterSpacing:1}}>⚽ {assocName.toUpperCase()} · SEASON {assocSeason}</div>
+                      <div style={{fontSize:10,color:"#999"}}>Printed {new Date().toLocaleDateString()}</div>
+                    </div>
+                  </div>
+                </div>
+              );
+
+              // CARDS MODE
+              return (
+                <div>
+                  {/* Team header */}
+                  <div style={{...css.card,borderColor:team.color+"55",display:"flex",alignItems:"center",gap:14,marginBottom:16,flexWrap:"wrap"}}>
+                    <TeamLogo logo={team.logo} name={team.name} color={team.color} size={56}/>
+                    <div>
+                      <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:22,color:team.color,letterSpacing:1}}>{team.name}</div>
+                      <div style={{fontSize:12,color:C.muted}}>{squad.length} players · {assocSeason} · League Position #{tablePos}</div>
+                    </div>
+                  </div>
+                  {squad.length===0 && <div style={{...css.card,textAlign:"center",padding:40,color:C.muted}}>No players registered for this team.</div>}
+                  {/* Cards grid */}
+                  <div id="print-area" style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:12}}>
+                    {squad.map((p,i)=>{
+                      const scorerEntry = scorers.find(s=>s.teamId===printTeamId&&s.playerName===p.name);
+                      return (
+                        <div key={p.id} style={{background:"#fff",borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px #00000018",border:`1px solid ${team.color}33`,fontFamily:"'DM Sans',sans-serif"}}>
+                          {/* Card top band */}
+                          <div style={{background:`linear-gradient(135deg,${team.color},${team.color}99)`,padding:"14px 14px 8px",position:"relative",minHeight:90,display:"flex",flexDirection:"column",alignItems:"center"}}>
+                            {/* Jersey number */}
+                            <div style={{position:"absolute",top:8,left:10,fontFamily:"'Bebas Neue',sans-serif",fontSize:28,color:"rgba(255,255,255,0.25)",lineHeight:1}}>{i+1}</div>
+                            {/* Assoc logo top right */}
+                            <div style={{position:"absolute",top:8,right:10,fontSize:14,opacity:0.7}}>⚽</div>
+                            {/* Photo */}
+                            <div style={{width:64,height:64,borderRadius:"50%",background:"rgba(255,255,255,0.25)",border:"3px solid rgba(255,255,255,0.6)",overflow:"hidden",display:"flex",alignItems:"center",justifyContent:"center",marginBottom:6}}>
+                              {p.photo
+                                ?<img src={p.photo} alt={p.name} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+                                :<span style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:20,color:"#fff",letterSpacing:1}}>{initials(p.name)}</span>}
+                            </div>
+                          </div>
+                          {/* Card body */}
+                          <div style={{padding:"10px 12px 12px"}}>
+                            <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:15,color:"#111",letterSpacing:.5,lineHeight:1.2,marginBottom:3}}>{p.name}</div>
+                            <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:8,flexWrap:"wrap"}}>
+                              <span style={{padding:"2px 8px",background:`${team.color}18`,color:team.color,borderRadius:20,fontSize:10,fontWeight:700,letterSpacing:.5}}>{p.position}</span>
+                              <span style={{fontSize:10,color:"#888"}}>Age {p.age}</span>
+                            </div>
+                            {/* Mini stats if available */}
+                            {scorerEntry && (
+                              <div style={{display:"flex",gap:6,borderTop:"1px solid #eee",paddingTop:7}}>
+                                {[["⚽",scorerEntry.goals,"Goals"],["🎯",scorerEntry.assists,"Ast"],["🟨",scorerEntry.yellowCards,"YC"],["🟥",scorerEntry.redCards,"RC"]].map(([ico,val,lbl])=>(
+                                  <div key={lbl} style={{flex:1,textAlign:"center"}}>
+                                    <div style={{fontSize:12}}>{ico}</div>
+                                    <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:16,color:"#222",lineHeight:1}}>{val}</div>
+                                    <div style={{fontSize:8,color:"#aaa",letterSpacing:.5}}>{lbl}</div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                            {/* Club & season footer */}
+                            <div style={{marginTop:8,paddingTop:6,borderTop:"1px solid #f0f0f0",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                              <span style={{fontSize:9,color:"#bbb",letterSpacing:.5,textTransform:"uppercase"}}>{team.shortName}</span>
+                              <span style={{fontSize:9,color:"#bbb"}}>{assocSeason}</span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        )}
+
+        {/* ══ EDIT (admin only) ══════════════════════════════════════ */}
+        {tab==="edit" && isAdmin && !isViewer && (
+          <div>
+            <div style={css.title}>Edit & Manage</div>
+            <div style={css.sub}>Manage teams, players, stats and matches</div>
+            <div style={{display:"flex",gap:7,marginBottom:22,flexWrap:"wrap"}}>
+              {[["assoc","🏟️ Association"],["teams","👥 Teams"],["players","👤 Players"],["stats","📊 Stats"],["matches","⚽ Matches"],["scorers","🏅 Scorers"]].map(([k,l])=>(
+                <button key={k} style={tabPill(editSection===k)} className="hov" onClick={()=>setEditSection(k)}>{l}</button>
+              ))}
+            </div>
+
+            {/* ─ EDIT ASSOC */}
+            {editSection==="assoc" && (
+              <div style={css.card}>
+                <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:16,color:C.green,letterSpacing:2,marginBottom:18}}>Association Identity</div>
+                {/* Logo */}
+                <div className="uploadzone" style={{marginBottom:16,textAlign:"center"}} onClick={()=>pickFile("image/*",url=>setAssocLogo(url))}>
+                  {assocLogo
+                    ? <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
+                        <img src={assocLogo} alt="logo" style={{width:90,height:90,borderRadius:14,objectFit:"cover",border:`2px solid ${C.green}44`}}/>
+                        <span style={{fontSize:11,color:C.muted}}>Click to change logo</span>
+                      </div>
+                    : <><div style={{fontSize:40,marginBottom:6}}>🏟️</div><div style={{fontSize:13,color:C.muted}}>Click to upload association logo</div></>}
+                </div>
+                {assocLogo && <button className="hov" style={{...btn("d"),fontSize:11,padding:"6px 12px",marginBottom:12}} onClick={()=>setAssocLogo(null)}>🗑 Remove Logo</button>}
+                <div style={{marginBottom:12}}>
+                  <div style={css.lbl}>Association Name</div>
+                  <input type="text" style={css.inp} value={assocName} onChange={e=>setAssocName(e.target.value)} placeholder="Full association name"/>
+                </div>
+                <div style={{marginBottom:16}}>
+                  <div style={css.lbl}>Season</div>
+                  <input type="text" style={css.inp} value={assocSeason} onChange={e=>setAssocSeason(e.target.value)} placeholder="e.g. 2025/26"/>
+                </div>
+                <button className="hov" style={btn()} onClick={()=>toast("Association saved! ✅")}>✅ Save</button>
+              </div>
+            )}
+
+            {/* ─ EDIT TEAMS */}
+            {editSection==="teams" && (
+              <div>
+                <div style={{display:"flex",justifyContent:"flex-end",marginBottom:14}}>
+                  <button className="hov" style={btn()} onClick={()=>setModalAddTeam(true)}>+ New Team</button>
+                </div>
+                <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                  {teams.map(t=>(
+                    <div key={t.id} className="edit-row" style={{...css.card,display:"flex",alignItems:"center",gap:14,flexWrap:"wrap",padding:"14px 16px",marginBottom:0}}>
+                      {/* Logo upload */}
+                      <div className="photo-hover" style={{position:"relative",cursor:"pointer",flexShrink:0}} title="Click to upload logo" onClick={()=>pickFile("image/*",url=>updateTeam(t.id,{logo:url}))}>
+                        <TeamLogo logo={t.logo} name={t.name} color={t.color} size={52}/>
+                        <div className="photo-overlay" style={{position:"absolute",inset:0,borderRadius:8,background:"rgba(0,0,0,0.6)",display:"flex",alignItems:"center",justifyContent:"center",opacity:0,transition:"opacity .2s",fontSize:16,color:"#fff"}}>📷</div>
+                      </div>
+                      <div style={{flex:1,display:"grid",gridTemplateColumns:"1fr auto auto auto auto",gap:10,alignItems:"center",minWidth:260}}>
+                        <div>
+                          <div style={css.lbl}>Full Name</div>
+                          <input style={css.inp} value={t.name} onChange={e=>updateTeam(t.id,{name:e.target.value})} placeholder="Team name"/>
+                        </div>
+                        <div style={{width:88}}>
+                          <div style={css.lbl}>Short</div>
+                          <input style={{...css.inp,textTransform:"uppercase"}} maxLength={4} value={t.shortName} onChange={e=>updateTeam(t.id,{shortName:e.target.value.toUpperCase()})} placeholder="SHU"/>
+                        </div>
+                        <div>
+                          <div style={css.lbl}>Color</div>
+                          <div style={{display:"flex",alignItems:"center",gap:6}}>
+                            <input type="color" value={t.color} onChange={e=>updateTeam(t.id,{color:e.target.value})}/>
+                            <div style={{width:24,height:24,borderRadius:6,background:t.color,border:`2px solid ${t.color}88`}}/>
+                          </div>
+                        </div>
+                        <button className="hov" style={{...btn("o"),padding:"6px 10px",fontSize:12,marginTop:18}} onClick={()=>setModalEditTeam({...t})}>✏️ Edit</button>
+                        <button className="hov" style={{...btn("d"),padding:"6px 10px",fontSize:13,marginTop:18}} onClick={()=>removeTeam(t.id)}>🗑</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{marginTop:14}}>
+                  <button className="hov" style={btn()} onClick={()=>toast("Teams saved! ✅")}>✅ Save All Teams</button>
+                </div>
+              </div>
+            )}
+
+            {/* ─ EDIT PLAYERS */}
+            {editSection==="players" && (
+              <div>
+                <div style={{display:"flex",gap:7,flexWrap:"wrap",marginBottom:16}}>
+                  {teams.map(t=>(
+                    <button key={t.id} style={tabPill(selTeamId===t.id,t.color)} className="hov" onClick={()=>setSelTeamId(t.id)}>
+                      <TeamLogo logo={t.logo} name={t.name} color={t.color} size={18}/>{t.shortName}
+                      <span style={{background:`${t.color}33`,color:t.color,padding:"1px 6px",borderRadius:20,fontSize:10}}>{(players[t.id]||[]).length}</span>
+                    </button>
+                  ))}
+                </div>
+                {selTeam && (
+                  <div style={{...css.card,borderColor:selTeam.color+"66",display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10,marginBottom:14}}>
+                    <div style={{display:"flex",alignItems:"center",gap:12}}>
+                      <TeamLogo logo={selTeam.logo} name={selTeam.name} color={selTeam.color} size={46}/>
+                      <div>
+                        <div style={{fontFamily:"'Bebas Neue',sans-serif",color:selTeam.color,fontSize:19,letterSpacing:.5}}>{selTeam.name}</div>
+                        <div style={{fontSize:12,color:C.muted}}>{selPlayers.length} player{selPlayers.length!==1?"s":""}</div>
+                      </div>
+                    </div>
+                    <button className="hov" style={btn()} onClick={()=>setModalAddPlayer(true)}>+ Register Player</button>
+                  </div>
+                )}
+                {selPlayers.length===0
+                  ? <div style={{...css.card,textAlign:"center",padding:36,color:C.muted}}>No players. Register some above.</div>
+                  : <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:10}}>
+                      {selPlayers.map(p=>(
+                        <div key={p.id} style={{...css.card,display:"flex",alignItems:"center",gap:12,padding:14,marginBottom:0}}>
+                          {/* Photo upload — click avatar */}
+                          <div className="photo-hover" style={{position:"relative",cursor:"pointer",flexShrink:0}} title="Click to upload photo" onClick={()=>pickFile("image/*",url=>updatePlayer(selTeamId,p.id,{photo:url}))}>
+                            <PlayerAvatar photo={p.photo} name={p.name} color={selTeam?.color||C.green} size={54}/>
+                            <div className="photo-overlay" style={{position:"absolute",inset:0,borderRadius:"50%",background:"rgba(0,0,0,0.6)",display:"flex",alignItems:"center",justifyContent:"center",opacity:0,transition:"opacity .2s",fontSize:14}}>📷</div>
+                          </div>
+                          <div style={{flex:1,minWidth:0}}>
+                            <div style={{fontFamily:"'Bebas Neue',sans-serif",color:C.text,fontSize:14,letterSpacing:.5,marginBottom:4}}>{p.name}</div>
+                            <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+                              <span style={{padding:"2px 8px",background:`${selTeam?.color||C.green}22`,color:selTeam?.color||C.green,borderRadius:20,fontSize:10,fontFamily:"'Bebas Neue',sans-serif",letterSpacing:.5}}>{p.position}</span>
+                              <span style={{fontSize:11,color:C.muted}}>Age {p.age}</span>
+                            </div>
+                          </div>
+                          <div style={{display:"flex",flexDirection:"column",gap:5,flexShrink:0}}>
+                            <button style={{...btn("o"),padding:"4px 8px",fontSize:11}} onClick={()=>setModalEditPlayer({...p,teamId:selTeamId})}>✏️</button>
+                            <button style={{...btn("d"),padding:"4px 8px",fontSize:11}} onClick={()=>removePlayer(selTeamId,p.id)}>🗑</button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                }
+              </div>
+            )}
+
+            {/* ─ EDIT STATS */}
+            {editSection==="stats" && (
+              <div>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(320px,1fr))",gap:14}}>
+                  {teams.map(t=>{
+                    const s=stats[t.id]||{};
+                    return (
+                      <div key={t.id} style={{...css.card,borderColor:t.color+"44"}}>
+                        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
+                          <TeamLogo logo={t.logo} name={t.name} color={t.color} size={36}/>
+                          <div>
+                            <div style={{fontFamily:"'Bebas Neue',sans-serif",color:t.color,fontSize:15}}>{t.name}</div>
+                            <div style={{fontSize:11,color:C.muted}}>Points: <span style={{color:C.accent,fontFamily:"'Bebas Neue',sans-serif",fontSize:16}}>{(s.won||0)*3+(s.drawn||0)-(s.pointsDeducted||0)}</span></div>
+                          </div>
+                        </div>
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9}}>
+                          {[["played","Matches Played"],["won","Won"],["drawn","Drawn"],["lost","Lost"],["goalsFor","Goals For"],["goalsAgainst","Goals Against"],["pointsDeducted","Pts Deducted"]].map(([f,l])=>(
+                            <div key={f} style={f==="pointsDeducted"?{gridColumn:"1/-1"}:{}}>
+                              <div style={{...css.lbl,color:f==="pointsDeducted"?"#ef4444":C.green}}>{l}</div>
+                              <input type="number" min="0" style={{...css.inp,borderColor:f==="pointsDeducted"?"#ef444444":C.border}} value={stats[t.id]?.[f]??0} onChange={e=>setStats(prev=>({...prev,[t.id]:{...prev[t.id],[f]:+e.target.value||0}}))}/>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div style={{marginTop:16}}><button className="hov" style={btn()} onClick={()=>{toast("Stats saved!");setTab("table");}}>✅ Save & View Table</button></div>
+              </div>
+            )}
+
+            {/* ─ EDIT MATCHES */}
+            {editSection==="matches" && (
+              <div>
+                <div style={{display:"flex",justifyContent:"flex-end",marginBottom:14}}>
+                  <button className="hov" style={btn()} onClick={()=>setModalAddMatch(true)}>+ Add Match</button>
+                </div>
+                <div style={{display:"flex",flexDirection:"column",gap:9}}>
+                  {matches.sort((a,b)=>a.round-b.round).map(m=>{
+                    const H=teams.find(t=>t.id===m.homeTeamId),A=teams.find(t=>t.id===m.awayTeamId);
+                    if(!H||!A) return null;
+                    return (
+                      <div key={m.id} style={{...css.card,display:"flex",alignItems:"center",gap:12,flexWrap:"wrap",padding:"12px 16px",marginBottom:0}}>
+                        <span style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:11,color:C.muted,letterSpacing:1,minWidth:56}}>RD {m.round}</span>
+                        <div style={{flex:1,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",minWidth:200}}>
+                          <TeamLogo logo={H.logo} name={H.name} color={H.color} size={26}/><span style={{fontFamily:"'Bebas Neue',sans-serif",color:H.color,fontSize:13}}>{H.shortName}</span>
+                          <span style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:16,color:m.played?C.accent:C.muted,letterSpacing:2,margin:"0 4px"}}>{m.played?`${m.homeScore} — ${m.awayScore}`:"VS"}</span>
+                          <span style={{fontFamily:"'Bebas Neue',sans-serif",color:A.color,fontSize:13}}>{A.shortName}</span><TeamLogo logo={A.logo} name={A.name} color={A.color} size={26}/>
+                        </div>
+                        <span style={{fontSize:11,color:C.muted}}>{m.date}</span>
+                        <span className="score-badge" style={{background:m.played?"#052e16":"#0c1a0e",color:m.played?C.green:C.muted,border:`1px solid ${m.played?C.greenDim:C.border}`}}>{m.played?"FT":"SOON"}</span>
+                        <button style={{...btn("d"),padding:"4px 8px",fontSize:12}} onClick={()=>removeMatch(m.id)}>🗑</button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* ─ EDIT SCORERS */}
+            {editSection==="scorers" && (
+              <div>
+                <div style={{display:"flex",justifyContent:"flex-end",marginBottom:14}}>
+                  <button className="hov" style={btn()} onClick={()=>setModalAddScorer(true)}>+ Add Stats</button>
+                </div>
+                <div style={css.card}>
+                  <table style={css.tbl}>
+                    <thead><tr>
+                      <th style={css.thL}>Player</th><th style={css.thL}>Club</th>
+                      <th style={css.th}>⚽</th><th style={css.th}>🎯</th><th style={css.th}>🟨</th><th style={css.th}>🟥</th><th style={css.th}></th>
+                    </tr></thead>
+                    <tbody>
+                      {scorers.map(s=>{
+                        const tm=teams.find(t=>t.id===s.teamId);
+                        return (
+                          <tr key={s.id}>
+                            <td style={css.tdL}><span style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:13}}>{s.playerName}</span></td>
+                            <td style={css.tdL}><div style={{display:"flex",alignItems:"center",gap:6}}>{tm&&<TeamLogo logo={tm.logo} name={tm.name} color={tm.color} size={20}/>}<span style={{fontSize:11,color:tm?.color||C.muted}}>{tm?.shortName}</span></div></td>
+                            <td style={css.td}>{s.goals}</td><td style={css.td}>{s.assists}</td>
+                            <td style={{...css.td,color:"#eab308"}}>{s.yellowCards}</td>
+                            <td style={{...css.td,color:"#ef4444"}}>{s.redCards}</td>
+                            <td style={css.td}><button style={{...btn("d"),padding:"3px 7px",fontSize:11}} onClick={()=>removeScorer(s.id)}>🗑</button></td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  {scorers.length===0&&<div style={{textAlign:"center",padding:20,color:C.muted}}>No stats yet.</div>}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+      </main>
+
+      {/* ═══════════════════ MODALS ═══════════════════ */}
+
+      {/* LOGIN */}
+      {showLogin && (
+        <div style={css.modal} onClick={e=>e.target===e.currentTarget&&(setShowLogin(false),setLoginErr(""),setLoginInput(""))}>
+          <div style={css.mbox}>
+            <div style={{textAlign:"center",marginBottom:22}}>
+              <div style={{fontSize:40,marginBottom:8}}>🔐</div>
+              <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:24,color:C.green,letterSpacing:2}}>Admin Login</div>
+              <div style={{fontSize:12,color:C.muted,marginTop:4}}>Enter your admin password to unlock editing</div>
+            </div>
+            <div style={css.lbl}>Password</div>
+            <input type="password" placeholder="••••" style={{...css.inp,letterSpacing:6,fontSize:20,textAlign:"center",marginBottom:6}} value={loginInput} onChange={e=>setLoginInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doLogin()}/>
+            {loginErr && <div style={{color:"#f87171",fontSize:12,marginBottom:8,textAlign:"center"}}>⚠️ {loginErr}</div>}
+            <div style={{display:"flex",gap:10,marginTop:14}}>
+              <button className="hov" style={{...btn(),flex:1}} onClick={doLogin}>Login</button>
+              <button className="hov" style={{...btn("g"),flex:1}} onClick={()=>{setShowLogin(false);setLoginErr("");setLoginInput("");}}>Cancel</button>
+            </div>
+            <div style={{marginTop:14,textAlign:"center",fontSize:11,color:C.muted}}>Default password: <span style={{color:C.green,fontFamily:"'Bebas Neue',sans-serif",letterSpacing:3,fontSize:14}}>0000</span></div>
+          </div>
+        </div>
+      )}
+
+      {/* CHANGE PASSWORD */}
+      {showPwChange && (
+        <div style={css.modal} onClick={e=>e.target===e.currentTarget&&setShowPwChange(false)}>
+          <div style={css.mbox}>
+            <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:22,color:C.green,letterSpacing:2,marginBottom:20}}>🔑 Change Password</div>
+            <div style={css.lbl}>New Password</div>
+            <input type="password" style={{...css.inp,marginBottom:12}} value={pwNew} onChange={e=>setPwNew(e.target.value)}/>
+            <div style={css.lbl}>Confirm Password</div>
+            <input type="password" style={{...css.inp,marginBottom:6}} value={pwConfirm} onChange={e=>setPwConfirm(e.target.value)}/>
+            {pwErr && <div style={{color:"#f87171",fontSize:12,marginBottom:8}}>⚠️ {pwErr}</div>}
+            <div style={{display:"flex",gap:10,marginTop:14}}>
+              <button className="hov" style={{...btn(),flex:1}} onClick={doChangePw}>Save Password</button>
+              <button className="hov" style={{...btn("g"),flex:1}} onClick={()=>{setShowPwChange(false);setPwErr("");}}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SHARE */}
+      {modalShare && (
+        <div style={css.modal} onClick={e=>e.target===e.currentTarget&&setModalShare(false)}>
+          <div style={css.mbox}>
+            <div style={{textAlign:"center",marginBottom:16}}>
+              <div style={{fontSize:44,marginBottom:8}}>🔗</div>
+              <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:22,color:C.green,letterSpacing:2}}>Share League</div>
+              <div style={{fontSize:12,color:C.muted,marginTop:4}}>
+                {cloudBinId ? <>Anyone with this link sees <strong style={{color:C.text}}>live, always-updated</strong> data</> : "Set up cloud sync to share a permanent live link"}
+              </div>
+            </div>
+
+            {!cloudBinId ? (
+              /* Cloud not yet set up */
+              <div style={{background:"#1a0a00",border:"1px solid #d9770655",borderRadius:10,padding:"16px",marginBottom:14,textAlign:"center"}}>
+                <div style={{fontSize:32,marginBottom:8}}>☁️</div>
+                <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:16,color:"#fb923c",letterSpacing:1,marginBottom:8}}>Cloud Sync Not Set Up</div>
+                <div style={{fontSize:12,color:C.muted,marginBottom:14,lineHeight:1.7}}>
+                  Activate cloud sync to get a <strong style={{color:C.text}}>single permanent link</strong> for Suhum FA that auto-updates whenever you make changes — online or offline.
+                </div>
+                <button className="hov" style={{...btn(),width:"100%",fontSize:14,padding:"12px"}} onClick={()=>{setModalShare(false);setModalCloudSetup(true);}}>
+                  ☁️ Activate Cloud Sync (Free)
+                </button>
+              </div>
+            ) : (
+              <>
+                {/* Permanent Public Link Box */}
+                <div style={{background:"#052e16",border:`1px solid ${C.green}44`,borderRadius:10,padding:"12px 14px",marginBottom:12}}>
+                  <div style={{fontSize:10,fontFamily:"'Bebas Neue',sans-serif",letterSpacing:2,color:C.green,marginBottom:6}}>🏆 SUHUM FOOTBALL ASSOCIATION — PERMANENT LINK</div>
+                  <div style={{fontSize:11,color:"#86efac",wordBreak:"break-all",fontFamily:"monospace",background:"#0a160c",padding:"8px 10px",borderRadius:6,marginBottom:8,userSelect:"all"}}>
+                    {getPublicLink()}
+                  </div>
+                  <div style={{fontSize:10,color:C.muted}}>✅ This link <strong style={{color:C.green}}>never changes</strong> — share once, always shows latest data</div>
+                </div>
+
+                {/* Cloud sync status */}
+                <div style={{background:"#0a160c",border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:11,color:C.muted,display:"flex",alignItems:"center",gap:8}}>
+                  {cloudStatus==="synced"  && <><span style={{color:"#4ade80"}}>🟢</span> Cloud live — all viewers see your latest changes</>}
+                  {cloudStatus==="syncing" && <><span style={{color:C.accent}}>⏳</span> Syncing to cloud…</>}
+                  {cloudStatus==="error"   && <><span style={{color:"#f87171"}}>⚠️</span> Cloud sync failed — try pushing manually</>}
+                  {cloudStatus==="idle"    && <><span>☁️</span> Make a change as admin to push to cloud</>}
+                </div>
+
+                {cloudStatus==="error" && (
+                  <button className="hov" style={{...btn(),width:"100%",fontSize:13,padding:"10px",marginBottom:8}} onClick={()=>{ setCloudStatus("syncing"); cloudPush({assocName,assocSeason,assocLogo,teams,stats,players,matches,scorers}).then(ok=>setCloudStatus(ok?"synced":"error")); }}>
+                    ☁️ Push to Cloud Now
+                  </button>
+                )}
+
+                {/* Big share button */}
+                <button className="hov" style={{...btn(),width:"100%",fontSize:15,padding:"13px 18px",marginBottom:8,display:"flex",alignItems:"center",justifyContent:"center",gap:10}} onClick={doShare}>
+                  <span style={{fontSize:18}}>📤</span> {typeof navigator!=="undefined"&&navigator.share?"Share via App…":"Copy Link"}
+                </button>
+
+                {/* Social share buttons */}
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:7,marginBottom:10}}>
+                  {[
+                    {icon:"💬",label:"WhatsApp",  color:"#25D366", fn:()=>{ const l=getPublicLink(); window.open("https://wa.me/?text="+encodeURIComponent("⚽ "+assocName+" – "+assocSeason+" Live League\n"+l),"_blank"); }},
+                    {icon:"🐦",label:"Twitter/X", color:"#1DA1F2", fn:()=>{ const l=getPublicLink(); window.open("https://twitter.com/intent/tweet?text="+encodeURIComponent("⚽ "+assocName+" "+assocSeason+" live table!")+"&url="+encodeURIComponent(l),"_blank"); }},
+                    {icon:"📘",label:"Facebook",  color:"#1877F2", fn:()=>{ const l=getPublicLink(); window.open("https://www.facebook.com/sharer/sharer.php?u="+encodeURIComponent(l),"_blank"); }},
+                  ].map(({icon,label,color,fn})=>(
+                    <button key={label} className="hov" style={{background:"transparent",border:`1px solid ${color}55`,borderRadius:8,padding:"9px 6px",cursor:"pointer",color,fontSize:11,fontFamily:"'Bebas Neue',sans-serif",letterSpacing:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4,transition:"all .18s"}} onClick={fn}>
+                      <span style={{fontSize:20}}>{icon}</span>{label}
+                    </button>
+                  ))}
+                </div>
+
+                <button className="hov" style={{...btn("g"),width:"100%",fontSize:12,padding:"9px",marginBottom:8,display:"flex",alignItems:"center",justifyContent:"center",gap:7}} onClick={copyLink}>
+                  <span>📋</span> Copy Link to Clipboard
+                </button>
+                {copyOk && <div style={{textAlign:"center",color:C.green,fontSize:13,marginBottom:8,fontWeight:600}}>✅ Link copied!</div>}
+              </>
+            )}
+
+            {isAdmin && (
+              <div style={{borderTop:`1px solid ${C.border}`,paddingTop:14,display:"flex",gap:9}}>
+                <button className="hov" style={{...btn("o"),flex:1,fontSize:12}} onClick={()=>{setModalShare(false);setShowPwChange(true);}}>🔑 Change Password</button>
+                <button className="hov" style={{...btn("g"),flex:1,fontSize:12}} onClick={()=>setModalShare(false)}>Close</button>
+              </div>
+            )}
+            {!isAdmin && <button className="hov" style={{...btn("g"),width:"100%"}} onClick={()=>setModalShare(false)}>Close</button>}
+          </div>
+        </div>
+      )}
+
+      {/* CLOUD SETUP MODAL */}
+      {modalCloudSetup && (
+        <div style={css.modal} onClick={e=>e.target===e.currentTarget&&(setModalCloudSetup(false),setCloudSetupStep("idle"))}>
+          <div style={css.mbox}>
+            <div style={{textAlign:"center",marginBottom:20}}>
+              <div style={{fontSize:48,marginBottom:8}}>☁️</div>
+              <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:22,color:C.green,letterSpacing:2}}>Activate Cloud Sync</div>
+              <div style={{fontSize:12,color:C.muted,marginTop:4,lineHeight:1.7}}>Creates a free cloud database for Suhum FA so your shared link always shows the latest data — on any device, anywhere.</div>
+            </div>
+
+            {cloudSetupStep==="idle" && (
+              <>
+                <div style={{background:"#0a160c",borderRadius:10,border:`1px solid ${C.border}`,padding:"14px",marginBottom:16}}>
+                  {[
+                    ["🔄","Auto-sync","Every change you make as admin pushes to cloud instantly"],
+                    ["🔗","Permanent link","Share once — link never changes or expires"],
+                    ["📱","Works everywhere","Viewers see live data on any phone, laptop, or tablet"],
+                  ].map(([icon,title,desc])=>(
+                    <div key={title} style={{display:"flex",gap:12,marginBottom:10,alignItems:"flex-start"}}>
+                      <span style={{fontSize:18,flexShrink:0}}>{icon}</span>
+                      <div><div style={{fontSize:12,color:C.text,fontWeight:600}}>{title}</div><div style={{fontSize:11,color:C.muted}}>{desc}</div></div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{marginBottom:14}}>
+                  <div style={css.lbl}>JSONBin Master Key (required)</div>
+                  <input
+                    type="password"
+                    placeholder="$2a$10$..."
+                    style={{...css.inp, fontFamily:"monospace", fontSize:12}}
+                    value={cloudApiKey}
+                    onChange={e=>setCloudApiKey(e.target.value)}
+                  />
+                  <div style={{fontSize:10,color:C.muted,marginTop:5,lineHeight:1.6}}>
+                    Free account at <span style={{color:C.green}}>jsonbin.io</span> → Account → Master Key → paste here.
+                  </div>
+                </div>
+                <button className="hov" style={{...btn(),width:"100%",fontSize:15,padding:"14px",marginBottom:8,opacity:cloudApiKey?1:0.5,cursor:cloudApiKey?"pointer":"not-allowed"}} onClick={()=>cloudApiKey&&doCloudActivate()}>
+                  🚀 Activate Cloud Sync
+                </button>
+                <button className="hov" style={{...btn("g"),width:"100%",fontSize:12}} onClick={()=>{setModalCloudSetup(false);setCloudSetupStep("idle");}}>Cancel</button>
+              </>
+            )}
+
+            {cloudSetupStep==="creating" && (
+              <div style={{textAlign:"center",padding:"20px 0"}}>
+                <div style={{fontSize:40,marginBottom:12,animation:"spin 1s linear infinite",display:"inline-block"}}>⏳</div>
+                <div style={{color:C.green,fontFamily:"'Bebas Neue',sans-serif",fontSize:16,letterSpacing:2}}>Creating cloud database…</div>
+                <div style={{color:C.muted,fontSize:12,marginTop:6}}>This takes a few seconds</div>
+              </div>
+            )}
+
+            {cloudSetupStep==="done" && (
+              <div style={{textAlign:"center",padding:"10px 0"}}>
+                <div style={{fontSize:48,marginBottom:12}}>🎉</div>
+                <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:20,color:C.green,letterSpacing:2,marginBottom:8}}>Cloud Sync Active!</div>
+                <div style={{background:"#052e16",border:`1px solid ${C.green}44`,borderRadius:10,padding:"12px",marginBottom:14}}>
+                  <div style={{fontSize:10,fontFamily:"'Bebas Neue',sans-serif",letterSpacing:2,color:C.green,marginBottom:6}}>YOUR PERMANENT LINK</div>
+                  <div style={{fontSize:11,color:"#86efac",wordBreak:"break-all",fontFamily:"monospace",background:"#0a160c",padding:"8px",borderRadius:6,userSelect:"all"}}>
+                    {getPublicLink()}
+                  </div>
+                </div>
+                <div style={{fontSize:11,color:C.muted,marginBottom:16,lineHeight:1.7}}>
+                  Share this link with players, fans, and officials. It will always show the latest league data whenever you update it as admin.
+                </div>
+                <button className="hov" style={{...btn(),width:"100%",fontSize:14,padding:"12px",marginBottom:8}} onClick={()=>{ navigator.clipboard.writeText(getPublicLink()||""); setCopyOk(true); toast("Link copied!"); }}>
+                  📋 Copy Link
+                </button>
+                <button className="hov" style={{...btn("g"),width:"100%",fontSize:12}} onClick={()=>{setModalCloudSetup(false);setCloudSetupStep("idle");}}>Done</button>
+              </div>
+            )}
+
+            {cloudSetupStep==="fail" && (
+              <div>
+                <div style={{textAlign:"center",marginBottom:12}}>
+                  <div style={{fontSize:40,marginBottom:10}}>⚠️</div>
+                  <div style={{color:"#f87171",fontFamily:"'Bebas Neue',sans-serif",fontSize:16,letterSpacing:2,marginBottom:8}}>Activation Failed</div>
+                  <div style={{color:C.muted,fontSize:12,marginBottom:12,lineHeight:1.7}}>JSONBin rejected the request — the Master Key may be missing or incorrect. Paste your key below and try again.</div>
+                </div>
+                <div style={{marginBottom:14}}>
+                  <div style={css.lbl}>JSONBin Master Key</div>
+                  <input
+                    type="password"
+                    placeholder="$2a$10$..."
+                    style={{...css.inp, fontFamily:"monospace", fontSize:12}}
+                    value={cloudApiKey}
+                    onChange={e=>setCloudApiKey(e.target.value)}
+                  />
+                  <div style={{fontSize:10,color:C.muted,marginTop:5,lineHeight:1.6}}>
+                    Free account at <span style={{color:C.green}}>jsonbin.io</span> → go to <b style={{color:C.text}}>Account → Master Key</b> → copy and paste here.
+                  </div>
+                </div>
+                <div style={{display:"flex",gap:10}}>
+                  <button className="hov" style={{...btn(),flex:1,opacity:cloudApiKey?1:0.5}} onClick={()=>{ if(cloudApiKey){setCloudSetupStep("idle");doCloudActivate();} }}>🔄 Try Again</button>
+                  <button className="hov" style={{...btn("g"),flex:1,fontSize:12}} onClick={()=>{setModalCloudSetup(false);setCloudSetupStep("idle");}}>Cancel</button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ASSOCIATION SETTINGS */}
+      {modalAssoc && (
+        <div style={css.modal} onClick={e=>e.target===e.currentTarget&&setModalAssoc(false)}>
+          <div style={css.mbox}>
+            <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:22,color:C.green,letterSpacing:2,marginBottom:18}}>🏟️ Association Settings</div>
+            {/* Logo upload */}
+            <div className="uploadzone" style={{marginBottom:16,textAlign:"center"}} onClick={()=>pickFile("image/*",url=>setAssocLogo(url))}>
+              {assocLogo
+                ? <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
+                    <img src={assocLogo} alt="logo" style={{width:80,height:80,borderRadius:14,objectFit:"cover",border:`2px solid ${C.green}44`}}/>
+                    <span style={{fontSize:11,color:C.muted}}>Click to change logo</span>
+                  </div>
+                : <><div style={{fontSize:36,marginBottom:6}}>🏟️</div><div style={{fontSize:13,color:C.muted}}>Click to upload association logo</div><div style={{fontSize:10,color:C.muted,marginTop:2}}>PNG, JPG, SVG — any size</div></>}
+            </div>
+            {assocLogo && (
+              <button className="hov" style={{...btn("d"),width:"100%",fontSize:11,padding:"6px",marginBottom:12}} onClick={()=>setAssocLogo(null)}>🗑 Remove Logo</button>
+            )}
+            <div style={{marginBottom:12}}>
+              <div style={css.lbl}>Association Name</div>
+              <input type="text" style={css.inp} value={assocName} onChange={e=>setAssocName(e.target.value)} placeholder="e.g. Suhum Municipal Football Association"/>
+            </div>
+            <div style={{marginBottom:20}}>
+              <div style={css.lbl}>Season</div>
+              <input type="text" style={css.inp} value={assocSeason} onChange={e=>setAssocSeason(e.target.value)} placeholder="e.g. 2025/26"/>
+            </div>
+            <div style={{display:"flex",gap:10}}>
+              <button className="hov" style={{...btn(),flex:1}} onClick={()=>{setModalAssoc(false);toast("Association updated!");}}>Save</button>
+              <button className="hov" style={{...btn("g"),flex:1}} onClick={()=>setModalAssoc(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ADD TEAM */}
+      {modalAddTeam && (
+        <div style={css.modal} onClick={e=>e.target===e.currentTarget&&setModalAddTeam(false)}>
+          <div style={css.mbox}>
+            <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:22,color:C.green,letterSpacing:2,marginBottom:18}}>Add New Team</div>
+            <div className="uploadzone" style={{marginBottom:16}} onClick={()=>pickFile("image/*",url=>setNewTeam(t=>({...t,logo:url})))}>
+              {newTeam.logo
+                ? <div style={{display:"flex",justifyContent:"center"}}><TeamLogo logo={newTeam.logo} name={newTeam.name||"NEW"} color={newTeam.color} size={70}/></div>
+                : <><div style={{fontSize:28,marginBottom:6}}>🏟️</div><div style={{fontSize:12,color:C.muted}}>Click to upload team crest / logo</div><div style={{fontSize:10,color:C.muted,marginTop:2}}>JPG, PNG, SVG — any size</div></>}
+            </div>
+            {[["Full Team Name *","name","e.g. Suhum FC Warriors"],["Short Name (max 4) *","shortName","e.g. SFW"]].map(([l,f,ph])=>(
+              <div key={f} style={{marginBottom:12}}>
+                <div style={css.lbl}>{l}</div>
+                <input type="text" placeholder={ph} maxLength={f==="shortName"?4:60} style={css.inp} value={newTeam[f]} onChange={e=>setNewTeam(t=>({...t,[f]:f==="shortName"?e.target.value.toUpperCase():e.target.value}))}/>
+              </div>
+            ))}
+            <div style={{marginBottom:18}}>
+              <div style={css.lbl}>Team Color</div>
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                <input type="color" value={newTeam.color} onChange={e=>setNewTeam(t=>({...t,color:e.target.value}))}/>
+                <div style={{width:32,height:32,borderRadius:8,background:newTeam.color,border:`2px solid ${newTeam.color}88`}}/>
+                <span style={{fontSize:12,color:newTeam.color,fontFamily:"'Bebas Neue',sans-serif"}}>{newTeam.color.toUpperCase()}</span>
+              </div>
+            </div>
+            <div style={{display:"flex",gap:10}}>
+              <button className="hov" style={{...btn(),flex:1}} onClick={addTeam}>Add Team</button>
+              <button className="hov" style={{...btn("g"),flex:1}} onClick={()=>setModalAddTeam(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* EDIT TEAM MODAL */}
+      {modalEditTeam && (
+        <div style={css.modal} onClick={e=>e.target===e.currentTarget&&setModalEditTeam(null)}>
+          <div style={css.mbox}>
+            <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:22,color:C.green,letterSpacing:2,marginBottom:18}}>Edit Team</div>
+            {/* Logo upload */}
+            <div className="uploadzone" style={{marginBottom:16}} onClick={()=>pickFile("image/*",url=>setModalEditTeam(t=>({...t,logo:url})))}>
+              {modalEditTeam.logo
+                ? <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
+                    <TeamLogo logo={modalEditTeam.logo} name={modalEditTeam.name} color={modalEditTeam.color} size={70}/>
+                    <span style={{fontSize:11,color:C.muted}}>Click to change logo</span>
+                  </div>
+                : <><div style={{fontSize:28,marginBottom:6}}>🏟️</div><div style={{fontSize:12,color:C.muted}}>Click to upload team crest / logo</div></>}
+            </div>
+            {[["Full Team Name","name"],["Short Name (max 4)","shortName"]].map(([l,f])=>(
+              <div key={f} style={{marginBottom:12}}>
+                <div style={css.lbl}>{l}</div>
+                <input type="text" maxLength={f==="shortName"?4:60} style={css.inp} value={modalEditTeam[f]} onChange={e=>setModalEditTeam(t=>({...t,[f]:f==="shortName"?e.target.value.toUpperCase():e.target.value}))}/>
+              </div>
+            ))}
+            <div style={{marginBottom:18}}>
+              <div style={css.lbl}>Team Color</div>
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                <input type="color" value={modalEditTeam.color} onChange={e=>setModalEditTeam(t=>({...t,color:e.target.value}))}/>
+                <div style={{width:32,height:32,borderRadius:8,background:modalEditTeam.color,border:`2px solid ${modalEditTeam.color}88`}}/>
+                <span style={{fontSize:12,color:modalEditTeam.color,fontFamily:"'Bebas Neue',sans-serif"}}>{modalEditTeam.color.toUpperCase()}</span>
+              </div>
+            </div>
+            <div style={{display:"flex",gap:10}}>
+              <button className="hov" style={{...btn(),flex:1}} onClick={saveEditTeam}>Save Changes</button>
+              <button className="hov" style={{...btn("g"),flex:1}} onClick={()=>setModalEditTeam(null)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ADD PLAYER */}
+      {modalAddPlayer && (
+        <div style={css.modal} onClick={e=>e.target===e.currentTarget&&setModalAddPlayer(false)}>
+          <div style={css.mbox}>
+            <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:22,color:C.green,letterSpacing:2,marginBottom:18}}>Register Player</div>
+            {/* Photo upload */}
+            <div className="uploadzone" style={{marginBottom:14}} onClick={()=>pickFile("image/*",url=>setNewPlayer(p=>({...p,photo:url})))}>
+              {newPlayer.photo
+                ? <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
+                    <PlayerAvatar photo={newPlayer.photo} name={newPlayer.name||"?"} color={selTeam?.color||C.green} size={70}/>
+                    <span style={{fontSize:11,color:C.muted}}>Click to change photo</span>
+                  </div>
+                : <><div style={{fontSize:28,marginBottom:5}}>🧑‍🦱</div><div style={{fontSize:12,color:C.muted}}>Click to upload player photo</div><div style={{fontSize:10,color:C.muted,marginTop:2}}>Passport or action photo — any size</div></>}
+            </div>
+            {[["Full Name *","text","name","e.g. Kwame Asante"],["Age *","number","age","e.g. 23"]].map(([l,t,f,ph])=>(
+              <div key={f} style={{marginBottom:12}}>
+                <div style={css.lbl}>{l}</div>
+                <input type={t} placeholder={ph} style={css.inp} value={newPlayer[f]} onChange={e=>setNewPlayer(p=>({...p,[f]:e.target.value}))}/>
+              </div>
+            ))}
+            <div style={{marginBottom:18}}>
+              <div style={css.lbl}>Position</div>
+              <select style={css.inp} value={newPlayer.position} onChange={e=>setNewPlayer(p=>({...p,position:e.target.value}))}>
+                {POSITIONS.map(pos=><option key={pos} value={pos}>{pos}</option>)}
+              </select>
+            </div>
+            <div style={{display:"flex",gap:10}}>
+              <button className="hov" style={{...btn(),flex:1}} onClick={addPlayer}>Register</button>
+              <button className="hov" style={{...btn("g"),flex:1}} onClick={()=>setModalAddPlayer(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* EDIT PLAYER */}
+      {modalEditPlayer && (
+        <div style={css.modal} onClick={e=>e.target===e.currentTarget&&setModalEditPlayer(null)}>
+          <div style={css.mbox}>
+            <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:22,color:C.green,letterSpacing:2,marginBottom:18}}>Edit Player</div>
+            {/* Photo upload */}
+            <div className="uploadzone" style={{marginBottom:14}} onClick={()=>pickFile("image/*",url=>setModalEditPlayer(p=>({...p,photo:url})))}>
+              {modalEditPlayer.photo
+                ? <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
+                    <PlayerAvatar photo={modalEditPlayer.photo} name={modalEditPlayer.name} color={selTeam?.color||C.green} size={70}/>
+                    <span style={{fontSize:11,color:C.muted}}>Click to change photo</span>
+                  </div>
+                : <><div style={{fontSize:28,marginBottom:5}}>🧑‍🦱</div><div style={{fontSize:12,color:C.muted}}>Click to upload / change photo</div></>}
+            </div>
+            {[["Full Name","name","text"],["Age","age","number"]].map(([l,f,t])=>(
+              <div key={f} style={{marginBottom:12}}>
+                <div style={css.lbl}>{l}</div>
+                <input type={t} style={css.inp} value={modalEditPlayer[f]} onChange={e=>setModalEditPlayer(p=>({...p,[f]:e.target.value}))}/>
+              </div>
+            ))}
+            <div style={{marginBottom:18}}>
+              <div style={css.lbl}>Position</div>
+              <select style={css.inp} value={modalEditPlayer.position} onChange={e=>setModalEditPlayer(p=>({...p,position:e.target.value}))}>
+                {POSITIONS.map(pos=><option key={pos} value={pos}>{pos}</option>)}
+              </select>
+            </div>
+            <div style={{display:"flex",gap:10}}>
+              <button className="hov" style={{...btn(),flex:1}} onClick={()=>{updatePlayer(modalEditPlayer.teamId,modalEditPlayer.id,modalEditPlayer);setModalEditPlayer(null);toast("Player updated!");}}>Save Changes</button>
+              <button className="hov" style={{...btn("g"),flex:1}} onClick={()=>setModalEditPlayer(null)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ADD MATCH */}
+      {modalAddMatch && (
+        <div style={css.modal} onClick={e=>e.target===e.currentTarget&&setModalAddMatch(false)}>
+          <div style={css.mbox}>
+            <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:22,color:C.green,letterSpacing:2,marginBottom:18}}>Add Match</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+              <div><div style={css.lbl}>Home</div><select style={css.inp} value={newMatch.homeTeamId} onChange={e=>setNewMatch(m=>({...m,homeTeamId:+e.target.value}))}>{teams.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</select></div>
+              <div><div style={css.lbl}>Away</div><select style={css.inp} value={newMatch.awayTeamId} onChange={e=>setNewMatch(m=>({...m,awayTeamId:+e.target.value}))}>{teams.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</select></div>
+            </div>
+            <div style={{marginBottom:10}}><div style={css.lbl}>Date</div><input type="date" style={css.inp} value={newMatch.date} onChange={e=>setNewMatch(m=>({...m,date:e.target.value}))}/></div>
+            <div style={{marginBottom:10}}><div style={css.lbl}>Round</div><input type="number" min="1" placeholder="e.g. 5" style={css.inp} value={newMatch.round} onChange={e=>setNewMatch(m=>({...m,round:e.target.value}))}/></div>
+            <div style={{fontSize:10,color:C.muted,letterSpacing:1,fontFamily:"'Bebas Neue',sans-serif",marginBottom:8}}>Score — leave blank if upcoming</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:18}}>
+              <div><div style={css.lbl}>Home Score</div><input type="number" min="0" placeholder="—" style={css.inp} value={newMatch.homeScore} onChange={e=>setNewMatch(m=>({...m,homeScore:e.target.value}))}/></div>
+              <div><div style={css.lbl}>Away Score</div><input type="number" min="0" placeholder="—" style={css.inp} value={newMatch.awayScore} onChange={e=>setNewMatch(m=>({...m,awayScore:e.target.value}))}/></div>
+            </div>
+            <div style={{display:"flex",gap:10}}>
+              <button className="hov" style={{...btn(),flex:1}} onClick={addMatch}>Add Match</button>
+              <button className="hov" style={{...btn("g"),flex:1}} onClick={()=>setModalAddMatch(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ADD SCORER */}
+      {modalAddScorer && (
+        <div style={css.modal} onClick={e=>e.target===e.currentTarget&&setModalAddScorer(false)}>
+          <div style={css.mbox}>
+            <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:22,color:C.green,letterSpacing:2,marginBottom:18}}>Add Player Stats</div>
+            <div style={{marginBottom:12}}><div style={css.lbl}>Team</div><select style={css.inp} value={newScorer.teamId} onChange={e=>setNewScorer(s=>({...s,teamId:+e.target.value}))}>{teams.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</select></div>
+            <div style={{marginBottom:12}}><div style={css.lbl}>Player Name</div><input type="text" placeholder="e.g. Kwame Asante" style={css.inp} value={newScorer.playerName} onChange={e=>setNewScorer(s=>({...s,playerName:e.target.value}))}/></div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:18}}>
+              {[["goals","Goals ⚽"],["assists","Assists 🎯"],["yellowCards","Yellow 🟨"],["redCards","Red 🟥"]].map(([f,l])=>(
+                <div key={f}><div style={css.lbl}>{l}</div><input type="number" min="0" style={css.inp} value={newScorer[f]} onChange={e=>setNewScorer(s=>({...s,[f]:e.target.value}))}/></div>
+              ))}
+            </div>
+            <div style={{display:"flex",gap:10}}>
+              <button className="hov" style={{...btn(),flex:1}} onClick={addScorer}>Save</button>
+              <button className="hov" style={{...btn("g"),flex:1}} onClick={()=>setModalAddScorer(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TOAST */}
+      {notify && <div style={css.ntf(notify.type)}>{notify.type==="err"?"⚠️":"✅"} {notify.msg}</div>}
+
+      {/* ADMIN FOOTER */}
+      {isAdmin && !isViewer && (
+        <div style={{background:"#0a160c",borderTop:`1px solid ${C.border}`,padding:"9px 20px",display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",justifyContent:"center"}}>
+          <span style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:11,color:C.muted,letterSpacing:2}}>ADMIN:</span>
+          <button className="hov" style={{...btn("o"),fontSize:11,padding:"5px 12px"}} onClick={()=>setShowPwChange(true)}>🔑 Change Password</button>
+          <button className="hov" style={{...btn("o"),fontSize:11,padding:"5px 12px"}} onClick={()=>setModalShare(true)}>🔗 Share Public Link</button>
+          <button className="hov" style={{...btn("d"),fontSize:11,padding:"5px 12px"}} onClick={()=>{setIsAdmin(false);toast("Logged out.");}}>🔓 Logout</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+    // ── Render
+    const container = document.getElementById("root");
+    const root = ReactDOM.createRoot(container);
+    root.render(React.createElement(App));
+    // Hide loader
+    const loader = document.getElementById("pwa-loader");
+    if (loader) { loader.style.opacity = "0"; setTimeout(() => loader.remove(), 450); }
+  </script>
+
+  <!-- PWA service worker registration -->
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("./sw.js")
+          .then(r => console.log("SW registered:", r.scope))
+          .catch(e => console.log("SW error:", e));
+      });
+    }
+
+    // Install prompt (Android/Chrome)
+    let deferredPrompt;
+    window.addEventListener("beforeinstallprompt", e => {
+      e.preventDefault();
+      deferredPrompt = e;
+      const btn = document.getElementById("install-btn");
+      if (btn) btn.style.display = "flex";
+    });
+    window.addEventListener("appinstalled", () => {
+      const btn = document.getElementById("install-btn");
+      if (btn) btn.style.display = "none";
+      deferredPrompt = null;
+    });
+    window._smfaInstall = () => {
+      if (deferredPrompt) { deferredPrompt.prompt(); deferredPrompt.userChoice.then(() => { deferredPrompt = null; }); }
+    };
+  </script>
+</body>
+</html>
